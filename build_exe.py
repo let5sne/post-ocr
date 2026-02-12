@@ -2,15 +2,17 @@
 """
 打包脚本 - 将桌面程序打包成独立可执行文件
 使用方法: pip install pyinstaller && python build_exe.py
+
+调试版本: python build_exe.py --debug
 """
 import subprocess
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parent
+PROJECT_ROOT = Path(__file__).parent)
 
 
-def build():
+def build(debug=False):
     """使用 PyInstaller 打包"""
 
     print("正在打包，请稍候...")
@@ -24,12 +26,16 @@ def build():
         "-m", "PyInstaller",
         "--name=信封信息提取系统",
         "--onefile",
-        "--windowed",
         "--clean",
         "--noconfirm",
         "--paths=src",
-        "src/desktop.py",
     ]
+
+    # 调试模式：显示控制台窗口，便于查看错误
+    if not debug:
+        cmd.append("--windowed")
+
+    cmd.append("src/desktop.py")
 
     try:
         subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT))
@@ -54,4 +60,5 @@ def build():
 
 
 if __name__ == "__main__":
-    build()
+    debug = "--debug" in sys.argv
+    build(debug=debug)
