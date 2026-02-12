@@ -60,7 +60,7 @@ class MjpegServer(private val port: Int) {
         val iterator = clients.iterator()
         while (iterator.hasNext()) {
             val handler = iterator.next()
-            if (handler.isSocketActive()) {
+            if (handler.isAlive()) {
                 handler.sendFrame(frame)
             } else {
                 iterator.remove()
@@ -80,6 +80,7 @@ class MjpegServer(private val port: Int) {
         clients.forEach { it.close() }
         clients.clear()
         serverSocket = null
+        serverThread = null
     }
 
     private class ClientHandler(private val socket: Socket) : Thread() {
@@ -93,17 +94,17 @@ class MjpegServer(private val port: Int) {
                 clientStream = os
                 socket.setSoTimeout(5000)
 
-                // 读取HTTP请求 (清空缓冲区)
+                // 读取HTTP请求
                 val buffer = ByteArray(1024)
                 socket.getInputStream().read(buffer)
 
-                // 发送MJPEG流头 - 正确的HTTP格式
+                // 发送HTTP响应头
                 val header = byteArrayOf(
                     *("HTTP/1.1 200 OK\r\n").toByteArray(),
                     *("Content-Type: multipart/x-mixed-replace; boundary=boundary\r\n").toByteArray(),
                     *("Cache-Control: no-cache\r\n").toByteArray(),
                     *("Connection: close\r\n").toByteArray(),
-                    *("\r\n").toByteArray()  // 空行表示header结束
+                    *("\r\n").toByteArray()
                 )
 
                 os.write(header)
@@ -115,10 +116,10 @@ class MjpegServer(private val port: Int) {
         }
 
         fun sendFrame(frame: ByteArray) {
-            if (!initialized || clientStream == null) return
+            if (!initialized) return
 
             try {
-                // MJPEG frame header with \r\n
+                // MJPEG frame header
                 val header = byteArrayOf(
                     *("--boundary\r\n").toByteArray(),
                     *("Content-Type: image/jpeg\r\n").toByteArray(),
@@ -128,7 +129,7 @@ class MjpegServer(private val port: Int) {
 
                 clientStream?.write(header)
                 clientStream?.write(frame)
-                clientStream?.write(("\r\n").toByteArray())
+                clientStream?.write("\r\n".toByteArray())
                 clientStream?.flush()
             } catch (e: Exception) {
                 close()
@@ -143,7 +144,7 @@ class MjpegServer(private val port: Int) {
             }
         }
 
-        fun isSocketActive(): Boolean {
+        fun isAlive(): Boolean {
             return !socket.isClosed && socket.isConnected
         }
     }
