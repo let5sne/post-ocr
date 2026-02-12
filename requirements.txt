@@ -1,0 +1,6 @@
+paddleocr
+paddlepaddle
+pandas
+openpyxl
+pydantic
+tqdm
