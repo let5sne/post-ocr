@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.usbwebcam.app-mergeDebugResources-18:/values-ldltr-v21/values-ldltr-v21.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\yuanjian\\.gradle\\caches\\9.2.1\\transforms\\69c94489aa221d559d8b95bf8096e116\\workspace\\transformed\\appcompat-1.6.1\\res\\values-ldltr-v21\\values-ldltr-v21.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "112",
+                        "endOffsets": "163"
+                    }
+                }
+            ]
+        }
+    ]
+}

@@ -5,9 +5,16 @@
 """
 import os
 import sys
+
+# 禁用 OpenCV 警告日志
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
+os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
+
 import cv2
 import tempfile
 import pandas as pd
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -15,7 +22,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTableWidget, QTableWidgetItem, QComboBox,
     QFileDialog, QMessageBox, QGroupBox, QSplitter, QHeaderView,
-    QStatusBar, QProgressBar
+    QStatusBar, QProgressBar, QTabWidget
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QFont, QAction
@@ -64,11 +71,15 @@ class MainWindow(QMainWindow):
 
         # 摄像头
         self.cap = None
+        self.cap_is_url = False  # 是否为 URL 连接
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
 
         # 数据
         self.records = []
+        self.watch_folder = ""
+        self.watcher_active = False
+        self.adb_forwarded = False  # ADB 端口转发状态
 
         self.init_ui()
         self.load_cameras()
@@ -78,32 +89,51 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
 
-        # 左侧：摄像头预览
-        left_panel = QGroupBox("📷 摄像头预览")
-        left_layout = QVBoxLayout(left_panel)
+        # 左侧：使用 Tab 切换模式
+        left_panel = QTabWidget()
+
+        # Tab 1: 摄像头模式
+        cam_tab = QWidget()
+        cam_layout = QVBoxLayout(cam_tab)
 
         # 摄像头选择
-        cam_layout = QHBoxLayout()
-        cam_layout.addWidget(QLabel("摄像头:"))
+        cam_ctrl_layout = QHBoxLayout()
+        cam_ctrl_layout.addWidget(QLabel("摄像头:"))
         self.cam_combo = QComboBox()
-        self.cam_combo.setMinimumWidth(200)
-        cam_layout.addWidget(self.cam_combo)
+        self.cam_combo.setMinimumWidth(150)
+        cam_ctrl_layout.addWidget(self.cam_combo)
         self.btn_refresh = QPushButton("🔄 刷新")
         self.btn_refresh.clicked.connect(self.load_cameras)
-        cam_layout.addWidget(self.btn_refresh)
+        cam_ctrl_layout.addWidget(self.btn_refresh)
         self.btn_connect = QPushButton("▶ 连接")
         self.btn_connect.clicked.connect(self.toggle_camera)
-        cam_layout.addWidget(self.btn_connect)
-        cam_layout.addStretch()
-        left_layout.addLayout(cam_layout)
+        cam_ctrl_layout.addWidget(self.btn_connect)
+        cam_ctrl_layout.addStretch()
+        cam_layout.addLayout(cam_ctrl_layout)
+
+        # USB/ADB 连接区
+        adb_layout = QHBoxLayout()
+        adb_layout.addWidget(QLabel("USB连接:"))
+        from PyQt6.QtWidgets import QLineEdit
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("ADB模式默认: localhost:8080")
+        self.url_input.setText("localhost:8080")
+        self.url_input.setMinimumWidth(200)
+        adb_layout.addWidget(self.url_input)
+        self.btn_adb_connect = QPushButton("🔌 USB连接")
+        self.btn_adb_connect.setToolTip("通过ADB端口转发连接手机摄像头")
+        self.btn_adb_connect.setStyleSheet("background-color: #9C27B0; color: white;")
+        self.btn_adb_connect.clicked.connect(self.connect_adb_camera)
+        adb_layout.addWidget(self.btn_adb_connect)
+        cam_layout.addLayout(adb_layout)
 
         # 视频画面
         self.video_label = QLabel()
         self.video_label.setMinimumSize(640, 480)
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: #1a1a1a; border: 2px solid #333; border-radius: 8px;")
-        self.video_label.setText("点击「连接」启动摄像头\n\n支持 Droidcam / Iriun 等虚拟摄像头")
-        left_layout.addWidget(self.video_label)
+        self.video_label.setText("点击「连接」启动摄像头")
+        cam_layout.addWidget(self.video_label)
 
         # 拍照按钮
         self.btn_capture = QPushButton("📸 拍照识别 (空格键)")
@@ -112,7 +142,54 @@ class MainWindow(QMainWindow):
         self.btn_capture.setStyleSheet("background-color: #ff4b4b; color: white; border-radius: 8px;")
         self.btn_capture.clicked.connect(self.capture_and_recognize)
         self.btn_capture.setEnabled(False)
-        left_layout.addWidget(self.btn_capture)
+        cam_layout.addWidget(self.btn_capture)
+
+        # 提示标签
+        cam_layout.addStretch()
+        hint_label = QLabel("💡 USB连接步骤:\n1. 手机安装「USB摄像头」APP并启动\n2. USB 连接电脑\n3. 点击「USB连接」")
+        hint_label.setStyleSheet("color: #666; background: #f0f0f0; padding: 10px; border-radius: 5px;")
+        cam_layout.addWidget(hint_label)
+
+        left_panel.addTab(cam_tab, "📷 摄像头")
+
+        # Tab 2: 图片模式（USB 传照片）
+        img_tab = QWidget()
+        img_layout = QVBoxLayout(img_tab)
+
+        # 图片预览区
+        self.image_preview_label = QLabel()
+        self.image_preview_label.setMinimumSize(640, 480)
+        self.image_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_preview_label.setStyleSheet("background-color: #1a1a1a; border: 2px solid #333; border-radius: 8px;")
+        self.image_preview_label.setText("点击下方按钮选择图片\n\n支持 JPG/PNG 格式")
+        img_layout.addWidget(self.image_preview_label)
+
+        # 按钮区
+        btn_row = QHBoxLayout()
+
+        self.btn_select_image = QPushButton("📁 选择图片识别")
+        self.btn_select_image.setMinimumHeight(45)
+        self.btn_select_image.setFont(QFont("", 12))
+        self.btn_select_image.setStyleSheet("background-color: #2196F3; color: white; border-radius: 8px;")
+        self.btn_select_image.clicked.connect(self.select_and_recognize)
+        btn_row.addWidget(self.btn_select_image)
+
+        self.btn_select_folder = QPushButton("📂 监控文件夹")
+        self.btn_select_folder.setMinimumHeight(45)
+        self.btn_select_folder.setFont(QFont("", 12))
+        self.btn_select_folder.setToolTip("自动监控文件夹中的新图片并识别")
+        self.btn_select_folder.setStyleSheet("background-color: #FF9800; color: white; border-radius: 8px;")
+        self.btn_select_folder.clicked.connect(self.select_watch_folder)
+        btn_row.addWidget(self.btn_select_folder)
+
+        img_layout.addLayout(btn_row)
+
+        # 文件夹状态
+        self.folder_status_label = QLabel("未设置监控文件夹")
+        self.folder_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        img_layout.addWidget(self.folder_status_label)
+
+        left_panel.addTab(img_tab, "🖼 图片")
 
         # 右侧：结果列表
         right_panel = QGroupBox(f"📋 已识别记录 (0)")
@@ -151,6 +228,11 @@ class MainWindow(QMainWindow):
         splitter.setSizes([600, 500])
         layout.addWidget(splitter)
 
+        # 文件夹监控定时器
+        self.watch_timer = QTimer()
+        self.watch_timer.timeout.connect(self.check_watch_folder)
+        self.processed_files = set()
+
         # 快捷键
         self.shortcut_capture = QAction(self)
         self.shortcut_capture.setShortcut("Space")
@@ -161,21 +243,105 @@ class MainWindow(QMainWindow):
         """扫描可用摄像头"""
         self.cam_combo.clear()
         for i in range(10):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    self.cam_combo.addItem(f"摄像头 {i}", i)
-                cap.release()
+            try:
+                cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # 使用 DirectShow API
+                if cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        self.cam_combo.addItem(f"摄像头 {i}", i)
+                    cap.release()
+            except Exception:
+                pass
 
         if self.cam_combo.count() == 0:
             self.cam_combo.addItem("未检测到摄像头", -1)
-            self.statusBar().showMessage("未检测到摄像头，请连接 Droidcam")
+            self.statusBar().showMessage("未检测到摄像头")
         else:
             self.statusBar().showMessage(f"检测到 {self.cam_combo.count()} 个摄像头")
 
+    def connect_adb_camera(self):
+        """连接 USB/ADB 摄像头"""
+        # 首先设置 ADB 端口转发
+        try:
+            result = subprocess.run(
+                ["adb", "forward", "tcp:8080", "tcp:8080"],
+                capture_output=True,
+                text=True,
+                shell=True
+            )
+            if result.returncode == 0:
+                self.adb_forwarded = True
+                self.statusBar().showMessage("ADB 端口转发成功")
+            else:
+                # ADB 可能未启动，尝试直接连接
+                self.statusBar().showMessage("提示: 请确保手机已连接并开启USB调试")
+        except FileNotFoundError:
+            self.statusBar().showMessage("未找到 ADB，尝试直接连接...")
+
+        # 连接 MJPEG 流
+        url = self.url_input.text().strip()
+        if not url.startswith("http://"):
+            url = f"http://{url}/?action=stream" if "?" not in url else f"http://{url}"
+        else:
+            url = url if "?" in url else f"{url}/?action=stream"
+
+        self.cap = cv2.VideoCapture(url)
+
+        if self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            self.cap_is_url = True
+
+            self.timer.start(30)
+            self.btn_adb_connect.setText("⏹ 断开USB")
+            self.btn_adb_connect.setStyleSheet("background-color: #f44336; color: white;")
+            self.btn_capture.setEnabled(True)
+            self.url_input.setEnabled(False)
+            self.cam_combo.setEnabled(False)
+            self.btn_connect.setEnabled(False)
+            self.statusBar().showMessage(f"USB摄像头已连接: {url}")
+        else:
+            self.cap = None
+            self.cap_is_url = False
+            QMessageBox.warning(
+                self, "连接失败",
+                "无法连接到手机摄像头\n\n请检查：\n"
+                "1. 手机APP是否已启动\n"
+                "2. USB线是否连接\n"
+                "3. 是否已开启USB调试"
+            )
+
     def toggle_camera(self):
         """连接/断开摄像头"""
+        # 如果是 URL 连接模式，先断开
+        if self.cap_is_url:
+            self.timer.stop()
+            self.cap.release()
+            self.cap = None
+            self.cap_is_url = False
+
+            # 移除 ADB 转发
+            if self.adb_forwarded:
+                try:
+                    subprocess.run(
+                        ["adb", "forward", "--remove", "tcp:8080"],
+                        capture_output=True,
+                        shell=True
+                    )
+                    self.adb_forwarded = False
+                except:
+                    pass
+
+            self.btn_adb_connect.setText("🔌 USB连接")
+            self.btn_adb_connect.setStyleSheet("background-color: #9C27B0; color: white;")
+            self.btn_capture.setEnabled(False)
+            self.url_input.setEnabled(True)
+            self.cam_combo.setEnabled(True)
+            self.btn_connect.setEnabled(True)
+            self.video_label.setText("摄像头已断开")
+            self.statusBar().showMessage("USB摄像头已断开")
+            return
+
         if self.cap is None:
             cam_id = self.cam_combo.currentData()
             if cam_id is None or cam_id < 0:
@@ -332,11 +498,122 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已导出: {path}")
             QMessageBox.information(self, "成功", f"已导出 {len(self.records)} 条记录到:\n{path}")
 
+    def select_and_recognize(self):
+        """选择图片并识别"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择图片", "",
+            "图片文件 (*.jpg *.jpeg *.png *.bmp);;所有文件 (*.*)"
+        )
+        if not path:
+            return
+
+        # 显示预览
+        pixmap = QPixmap(path)
+        scaled = pixmap.scaled(
+            self.image_preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.image_preview_label.setPixmap(scaled)
+
+        self.statusBar().showMessage("正在识别...")
+        self.btn_select_image.setEnabled(False)
+
+        # 启动 OCR 线程
+        self.worker = OCRWorker(self.ocr, path)
+        self.worker.finished.connect(lambda r, t: self.on_image_ocr_finished(r, t, path))
+        self.worker.error.connect(lambda e: self.on_ocr_error(e, path))
+        self.worker.start()
+
+    def on_image_ocr_finished(self, record, texts, image_path):
+        """图片 OCR 完成"""
+        self.btn_select_image.setEnabled(True)
+
+        # 添加到记录
+        self.records.append(record)
+        self.update_table()
+
+        # 更新预览为已处理标记
+        self.image_preview_label.setText(f"✅ 识别完成\n\n{record.get('联系人/单位名', '未知')}")
+
+        self.statusBar().showMessage(f"识别完成: {record.get('联系人/单位名', '未知')}")
+
+    def select_watch_folder(self):
+        """选择监控文件夹"""
+        folder = QFileDialog.getExistingDirectory(self, "选择要监控的文件夹")
+        if not folder:
+            return
+
+        self.watch_folder = folder
+        self.processed_files.clear()
+
+        # 扫描现有文件
+        existing = list(Path(folder).glob("*.jpg")) + list(Path(folder).glob("*.jpeg")) + list(Path(folder).glob("*.png"))
+        for f in existing:
+            self.processed_files.add(str(f))
+
+        if self.watcher_active:
+            self.watch_timer.stop()
+
+        self.watch_timer.start(500)  # 每0.5秒检查一次
+        self.watcher_active = True
+        self.btn_select_folder.setStyleSheet("background-color: #4CAF50; color: white; border-radius: 8px;")
+        self.folder_status_label.setText(f"📁 监控中: {folder}\n已跳过 {len(existing)} 个现有文件")
+
+    def check_watch_folder(self):
+        """检查监控文件夹中的新文件"""
+        if not self.watch_folder:
+            return
+
+        patterns = ["*.jpg", "*.jpeg", "*.png", "*.bmp"]
+        new_files = []
+
+        for pattern in patterns:
+            for f in Path(self.watch_folder).glob(pattern):
+                if str(f) not in self.processed_files:
+                    new_files.append(f)
+                    self.processed_files.add(str(f))
+
+        for f in new_files:
+            self.statusBar().showMessage(f"发现新图片: {f.name}")
+            self.recognize_file(str(f))
+
+    def recognize_file(self, file_path):
+        """识别指定文件"""
+        pixmap = QPixmap(file_path)
+        if pixmap.isNull():
+            return
+
+        # 切换到图片 tab 并显示预览
+        scaled = pixmap.scaled(
+            self.image_preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.image_preview_label.setPixmap(scaled)
+
+        # 启动 OCR
+        self.worker = OCRWorker(self.ocr, file_path)
+        self.worker.finished.connect(lambda r, t: self.on_image_ocr_finished(r, t, file_path))
+        self.worker.error.connect(lambda e: self.on_ocr_error(e, file_path))
+        self.worker.start()
+
     def closeEvent(self, event):
         """关闭窗口"""
         if self.cap:
             self.timer.stop()
             self.cap.release()
+
+        # 移除 ADB 端口转发
+        if self.adb_forwarded:
+            try:
+                subprocess.run(
+                    ["adb", "forward", "--remove", "tcp:8080"],
+                    capture_output=True,
+                    shell=True
+                )
+            except:
+                pass
         event.accept()
 
 
