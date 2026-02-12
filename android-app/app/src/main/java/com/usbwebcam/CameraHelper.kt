@@ -149,11 +149,32 @@ class CameraHelper(
     }
 
     private fun closeCamera() {
-        captureSession?.close()
+        try {
+            captureSession?.stopRepeating()
+            captureSession?.abortCaptures()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            captureSession?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         captureSession = null
-        imageReader?.close()
+
+        try {
+            imageReader?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         imageReader = null
-        cameraDevice?.close()
+
+        try {
+            cameraDevice?.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         cameraDevice = null
     }
 }
