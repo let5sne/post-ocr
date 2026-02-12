@@ -1,22 +1,53 @@
-# Data
+# ==================================================
+# 数据文件
+# ==================================================
 data/input/*
 !data/input/.gitkeep
 data/output/*
 !data/output/.gitkeep
 
+# ==================================================
 # Python
+# ==================================================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+htmlcov/
 .DS_Store
 .venv/
 venv/
+.env
 
-# Android - 源代码保留，忽略构建产物
+# ==================================================
+# Android - 构建产物
+# ==================================================
 android-app/app/build/
+android-app/build/
 android-app/.gradle/
 android-app/.idea/
 android-app/local.properties
 android-app/captures/
 android-app/*.apk
 android-app/*.aab
-android-app/.gradle/
+android-app/*.ap_
+android-app/output/
+android-app/.externalNativeBuild
+android-app/.cxx
+
+# Gradle
+android-app/gradle-app.setting
+android-app/.navigation/
+android-app/*/build/
+
+# Keystore files
+android-app/*.jks
+android-app/*.keystore
+
+# Debug
+android-app/**/kotlin/
+android-app/**/tmp/
+android-app/**/.kotlin/
