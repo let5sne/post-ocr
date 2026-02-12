@@ -35,18 +35,16 @@ def main():
 
     for img_path in tqdm(image_paths):
         try:
-            # 1. 执行 OCR 识别 (使用 predict 替代 deprecated 的 ocr 方法)
-            result = ocr.predict(img_path)
+            # 1. 执行 OCR 识别
+            result = ocr.ocr(img_path, cls=False)
 
-            # 2. 提取文字行 (适配 Paddlex OCRResult 结构)
+            # 2. 提取文字行
             ocr_texts = []
-            if result:
-                for res in result:
-                    # 获取识别出的文本列表
-                    if hasattr(res, "rec_texts"):
-                        ocr_texts.extend(res.rec_texts)
-                    elif isinstance(res, dict) and "rec_texts" in res:
-                        ocr_texts.extend(res["rec_texts"])
+            if result and result[0]:
+                for line in result[0]:
+                    # line 格式: [box, (text, confidence)]
+                    if line and len(line) >= 2:
+                        ocr_texts.append(line[1][0])
 
             # 3. 结构化解析
             if ocr_texts:
