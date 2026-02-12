@@ -1,6 +1,7 @@
-paddleocr
-paddlepaddle
+paddleocr>=2.6,<3
+paddlepaddle>=2.5,<3
 pandas
 openpyxl
 pydantic
 tqdm
+streamlit
