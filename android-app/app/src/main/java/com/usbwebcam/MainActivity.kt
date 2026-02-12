@@ -48,8 +48,11 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "图片已保存到相册", Toast.LENGTH_SHORT).show()
         }
 
-        // 自动启动
-        if (checkPermission()) {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
             startCamera()
         }
     }
@@ -68,15 +71,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCamera() {
+        if (cameraHelper != null) return
+
+        mjpegServer = MjpegServer(8080)
         cameraHelper = CameraHelper(this) { frame, _, _ ->
             mjpegServer?.updateFrame(frame)
         }
-
-        mjpegServer = MjpegServer(8080)
+        
+        // Start the server and update UI once started
         mjpegServer?.start {
             runOnUiThread {
-                findViewById<TextView>(R.id.tv_status).text =
-                    "服务运行中端口: 8080IP: 无需IP (ADB模式)USB连接命令:adb forward tcp:8080 tcp:8080"
+                findViewById<TextView>(R.id.tv_status).text = """
+                    服务运行中
+                    端口: 8080
+                    IP: 无需IP (ADB模式)
+                    USB连接命令:
+                    adb forward tcp:8080 tcp:8080
+                """.trimIndent()
                 findViewById<Button>(R.id.btn_start).isEnabled = false
                 findViewById<Button>(R.id.btn_stop).isEnabled = true
             }
@@ -87,11 +98,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopCamera() {
         cameraHelper?.stop()
+        cameraHelper = null
         mjpegServer?.stop()
+        mjpegServer = null
 
-        findViewById<TextView>(R.id.tv_status).text = "服务已停止"
-        findViewById<Button>(R.id.btn_start).isEnabled = true
-        findViewById<Button>(R.id.btn_stop).isEnabled = false
+        runOnUiThread {
+            findViewById<TextView>(R.id.tv_status).text = "服务已停止"
+            findViewById<Button>(R.id.btn_start).isEnabled = true
+            findViewById<Button>(R.id.btn_stop).isEnabled = false
+        }
     }
 
     override fun onDestroy() {
