@@ -60,7 +60,7 @@ class MjpegServer(private val port: Int) {
         val iterator = clients.iterator()
         while (iterator.hasNext()) {
             val handler = iterator.next()
-            if (handler.isAlive()) {
+            if (handler.isClientAlive()) {
                 handler.sendFrame(frame)
             } else {
                 iterator.remove()
@@ -144,7 +144,7 @@ class MjpegServer(private val port: Int) {
             }
         }
 
-        fun isAlive(): Boolean {
+        fun isClientAlive(): Boolean {
             return !socket.isClosed && socket.isConnected
         }
     }
