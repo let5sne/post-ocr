@@ -11,13 +11,14 @@ PROJECT_ROOT = Path(__file__).parent
 
 
 def build():
-    """使用 PyInstaller 打包（使用 Python -m 方式兼容性更好）"""
+    """使用 PyInstaller 打包"""
 
     print("正在打包，请稍候...")
     print(f"工作目录: {PROJECT_ROOT}")
     print("-" * 50)
 
-    # 使用 Python -m PyInstaller 方式，兼容性更好
+    # 使用 Python -m PyInstaller 方式
+    # --paths 将 src 目录添加到 Python 路径，避免导入问题
     cmd = [
         sys.executable,
         "-m", "PyInstaller",
@@ -26,7 +27,7 @@ def build():
         "--windowed",
         "--clean",
         "--noconfirm",
-        "--add-data=src;src",
+        "--paths=src",
         "src/desktop.py",
     ]
 
