@@ -51,3 +51,12 @@ android-app/*.keystore
 android-app/**/kotlin/
 android-app/**/tmp/
 android-app/**/.kotlin/
+
+# ==================================================
+# PyInstaller 打包产物
+# ==================================================
+*.spec
+build/
+dist/
+*.exe
+*.db
