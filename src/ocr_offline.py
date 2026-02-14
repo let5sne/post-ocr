@@ -73,7 +73,8 @@ def create_offline_ocr(models_base_dir: Path | None = None):
     """
     创建 PaddleOCR 2.x 实例（PP-OCRv4 中文）。
 
-    首次运行会自动下载模型到 ~/.paddleocr/whl/。
+    - 打包态：使用 models/ 目录下的离线模型（完全离线）
+    - 开发态：首次运行自动下载到 ~/.paddleocr/whl/
     """
     log = logging.getLogger("post_ocr.ocr")
 
@@ -83,11 +84,22 @@ def create_offline_ocr(models_base_dir: Path | None = None):
     log.info("create_offline_ocr: importing paddleocr")
     from paddleocr import PaddleOCR
 
+    # 构建 PaddleOCR 参数
+    kwargs = dict(lang="ch", use_angle_cls=False, show_log=False)
+
+    # 如果 models/ 目录存在离线模型，显式指定路径（打包分发场景）
+    models_dir = models_base_dir or get_models_base_dir()
+    det_dir = models_dir / "ch_PP-OCRv4_det_infer"
+    rec_dir = models_dir / "ch_PP-OCRv4_rec_infer"
+
+    if (det_dir / "inference.pdmodel").exists() and (rec_dir / "inference.pdmodel").exists():
+        log.info("使用离线模型: %s", models_dir)
+        kwargs["det_model_dir"] = str(det_dir)
+        kwargs["rec_model_dir"] = str(rec_dir)
+    else:
+        log.info("未找到离线模型，将使用默认路径（可能需要联网下载）")
+
     log.info("create_offline_ocr: creating PaddleOCR(lang=ch)")
-    ocr = PaddleOCR(
-        lang="ch",
-        use_angle_cls=False,
-        show_log=False,
-    )
+    ocr = PaddleOCR(**kwargs)
     log.info("create_offline_ocr: PaddleOCR created")
     return ocr
