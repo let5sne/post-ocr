@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 主色调：深蓝工业风 -->
+    <color name="primary">#1B2838</color>
+    <color name="primary_dark">#0F1923</color>
+    <color name="primary_light">#2A3F56</color>
+
+    <!-- 强调色 -->
+    <color name="accent_green">#43A047</color>
+    <color name="accent_green_dark">#2E7D32</color>
+    <color name="accent_red">#E53935</color>
+    <color name="accent_red_dark">#C62828</color>
+    <color name="accent_blue">#1E88E5</color>
+    <color name="accent_blue_dark">#1565C0</color>
+
+    <!-- 背景 -->
+    <color name="bg_main">#ECEFF1</color>
+    <color name="bg_card">#FFFFFF</color>
+    <color name="bg_status_bar">#1B2838</color>
+
+    <!-- 文字 -->
+    <color name="text_primary">#212121</color>
+    <color name="text_secondary">#546E7A</color>
+    <color name="text_hint">#90A4AE</color>
+    <color name="text_on_dark">#ECEFF1</color>
+    <color name="text_on_primary">#FFFFFF</color>
+
+    <!-- 状态指示 -->
+    <color name="status_running">#43A047</color>
+    <color name="status_stopped">#90A4AE</color>
+
+    <!-- 分隔线 -->
+    <color name="divider">#CFD8DC</color>
+</resources>

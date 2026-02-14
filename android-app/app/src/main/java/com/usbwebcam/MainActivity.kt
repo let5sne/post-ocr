@@ -103,6 +103,10 @@ class MainActivity : AppCompatActivity() {
                     text = "在电脑端浏览器打开上述地址即可查看画面"
                     visibility = View.VISIBLE
                 }
+                findViewById<TextView>(R.id.tv_indicator).apply {
+                    text = "● 运行中"
+                    setTextColor(getColor(R.color.status_running))
+                }
                 findViewById<Button>(R.id.btn_start).isEnabled = false
                 findViewById<Button>(R.id.btn_stop).isEnabled = true
             }
@@ -120,6 +124,10 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             findViewById<TextView>(R.id.tv_status).text = "服务已停止"
             findViewById<TextView>(R.id.tv_ip).visibility = View.GONE
+            findViewById<TextView>(R.id.tv_indicator).apply {
+                text = "⏸ 未启动"
+                setTextColor(getColor(R.color.status_stopped))
+            }
             findViewById<Button>(R.id.btn_start).isEnabled = true
             findViewById<Button>(R.id.btn_stop).isEnabled = false
         }

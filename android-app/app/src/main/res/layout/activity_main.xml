@@ -2,81 +2,152 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="horizontal"
-    android:padding="24dp"
-    android:background="#FAFAFA">
+    android:orientation="vertical"
+    android:background="@color/bg_main">
 
-    <!-- 左侧：状态信息 -->
+    <!-- 顶部标题栏 -->
     <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="match_parent"
-        android:layout_weight="1"
-        android:orientation="vertical"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingEnd="24dp">
+        android:paddingHorizontal="20dp"
+        android:background="@drawable/bg_header">
 
         <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="📷  USB 摄像头服务"
+            android:textSize="18sp"
+            android:textColor="@color/text_on_dark"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_indicator"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="USB 摄像头服务"
-            android:textSize="22sp"
-            android:textColor="#212121"
-            android:textStyle="bold"
-            android:layout_marginBottom="16dp" />
-
-        <TextView
-            android:id="@+id/tv_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="等待启动..."
-            android:textSize="16sp"
-            android:textColor="#424242"
-            android:lineSpacingExtra="4dp"
-            android:background="#FFFFFF"
-            android:padding="16dp"
-            android:layout_marginBottom="16dp" />
-
-        <TextView
-            android:id="@+id/tv_ip"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:text="⏸ 未启动"
             android:textSize="13sp"
-            android:textColor="#757575"
-            android:visibility="gone" />
+            android:textColor="@color/status_stopped" />
 
     </LinearLayout>
 
-    <!-- 右侧：按钮区 -->
+    <!-- 主内容区 -->
     <LinearLayout
-        android:layout_width="wrap_content"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center">
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="horizontal"
+        android:padding="12dp">
 
-        <Button
-            android:id="@+id/btn_start"
-            android:layout_width="160dp"
-            android:layout_height="56dp"
-            android:text="启动服务"
-            android:textSize="18sp"
-            android:layout_marginBottom="12dp" />
+        <!-- 左侧：状态信息卡片 -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:layout_marginEnd="12dp">
 
-        <Button
-            android:id="@+id/btn_stop"
-            android:layout_width="160dp"
-            android:layout_height="56dp"
-            android:text="停止服务"
-            android:textSize="18sp"
-            android:enabled="false"
-            android:layout_marginBottom="24dp" />
+            <LinearLayout
+                style="@style/CardStyle"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical">
 
-        <Button
-            android:id="@+id/btn_capture"
-            android:layout_width="160dp"
-            android:layout_height="56dp"
-            android:text="拍照保存"
-            android:textSize="18sp"
-            android:backgroundTint="#4CAF50" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="服务状态"
+                    android:textSize="12sp"
+                    android:textColor="@color/text_secondary"
+                    android:textStyle="bold"
+                    android:textAllCaps="true"
+                    android:letterSpacing="0.08"
+                    android:layout_marginBottom="8dp" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="@color/divider"
+                    android:layout_marginBottom="8dp" />
+
+                <ScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:fillViewport="true">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/tv_status"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="等待启动..."
+                            android:textSize="14sp"
+                            android:textColor="@color/text_primary"
+                            android:lineSpacingExtra="5dp"
+                            android:fontFamily="monospace" />
+
+                        <TextView
+                            android:id="@+id/tv_ip"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:textSize="12sp"
+                            android:textColor="@color/text_hint"
+                            android:layout_marginTop="8dp"
+                            android:visibility="gone" />
+
+                    </LinearLayout>
+
+                </ScrollView>
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- 右侧：操作按钮 -->
+        <LinearLayout
+            android:layout_width="180dp"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <Button
+                android:id="@+id/btn_start"
+                style="@style/BtnPrimary"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="▶  启动服务"
+                android:layout_marginBottom="10dp" />
+
+            <Button
+                android:id="@+id/btn_stop"
+                style="@style/BtnDanger"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="■  停止服务"
+                android:enabled="false"
+                android:layout_marginBottom="24dp" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="@color/divider"
+                android:layout_marginBottom="24dp" />
+
+            <Button
+                android:id="@+id/btn_capture"
+                style="@style/BtnCapture"
+                android:layout_width="match_parent"
+                android:layout_height="60dp"
+                android:text="📸  拍照保存" />
+
+        </LinearLayout>
 
     </LinearLayout>
 
