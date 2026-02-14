@@ -11,6 +11,7 @@ import time
 import logging
 import threading
 import queue
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -25,8 +26,6 @@ from PyQt6.QtGui import QImage, QPixmap, QFont, QAction, QKeySequence, QShortcut
 
 from processor import extract_info
 from ocr_offline import create_offline_ocr, get_models_base_dir
-
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 logger = logging.getLogger("post_ocr.desktop")
 
@@ -122,7 +121,7 @@ class OCRService(QObject):
     def _ensure_ocr(self) -> None:
         if self._ocr is None:
             logger.info("OCR ensure_ocr: 开始创建 PaddleOCR（线程=%s）", threading.current_thread().name)
-            self._ocr = create_offline_ocr(models_base_dir=self._models_base_dir, show_log=False)
+            self._ocr = create_offline_ocr(models_base_dir=self._models_base_dir)
             logger.info("OCR ensure_ocr: PaddleOCR 创建完成")
             self.ready.emit()
 
@@ -525,7 +524,13 @@ class MainWindow(QMainWindow):
     def load_cameras(self):
         """扫描可用摄像头"""
         self.cam_combo.clear()
-        # macOS 上设备编号会变化（尤其“连续互通相机”/虚拟摄像头），这里多扫一些更稳。
+
+        # 始终提供手机 MJPEG 流入口（Android 端 MjpegServer 默认端口 8080）
+        # 使用前需：1) USB 连接手机  2) adb forward tcp:8080 tcp:8080
+        mjpeg_url = os.environ.get("POST_OCR_MJPEG_URL", "http://localhost:8080").strip()
+        self.cam_combo.addItem(f"📱 手机摄像头 (USB)", mjpeg_url)
+
+        # macOS 上设备编号会变化（尤其"连续互通相机"/虚拟摄像头），这里多扫一些更稳。
         # 若你想减少探测范围，可设置环境变量 POST_OCR_MAX_CAMERAS，例如：POST_OCR_MAX_CAMERAS=3
         try:
             max_probe = int(os.environ.get("POST_OCR_MAX_CAMERAS", "").strip() or "10")
@@ -560,26 +565,93 @@ class MainWindow(QMainWindow):
                     pass
 
         if found == 0:
-            # 自动探测可能因权限/占用/设备延迟失败；仍提供手动尝试入口，避免用户被“无设备”卡住
-            for i in range(max_probe):
+            # 自动探测失败时，仅提供少量手动入口（0~2），避免列出大量不存在的设备误导用户
+            fallback_count = min(3, max_probe)
+            for i in range(fallback_count):
                 self.cam_combo.addItem(f"摄像头 {i}（手动尝试）", i)
-            self.statusBar().showMessage(
-                "未能自动检测到可用摄像头。"
-                "如为 macOS，请在 系统设置->隐私与安全->相机 中允许当前终端/应用访问；"
-                "并确保 iPhone 已解锁且未被其他应用占用。"
-            )
+            if sys.platform == "win32":
+                hint = (
+                    "未检测到摄像头。请确认：1) 已连接摄像头或已启动 Droidcam/Iriun；"
+                    "2) 其他应用未占用摄像头；3) 可手动选择编号后点击「连接」尝试。"
+                )
+            else:
+                hint = (
+                    "未检测到摄像头。"
+                    "macOS 请在 系统设置->隐私与安全->相机 中允许访问；"
+                    "并确保 iPhone 已解锁且未被其他应用占用。"
+                )
+            self.statusBar().showMessage(hint)
         else:
             self.statusBar().showMessage(f"检测到 {found} 个摄像头")
         logger.info("摄像头扫描结束：found=%s", found)
 
-    def _open_capture(self, cam_id: int):
+    def _adb_forward(self, local_port: int = 8080, remote_port: int = 8080) -> bool:
+        """自动执行 adb forward，将手机端口映射到本地。成功返回 True。"""
+        cmd = ["adb", "forward", f"tcp:{local_port}", f"tcp:{remote_port}"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                logger.info("adb forward 成功：%s", " ".join(cmd))
+                return True
+            # adb 存在但执行失败（如无设备）
+            stderr = (r.stderr or "").strip()
+            logger.warning("adb forward 失败(rc=%s): %s", r.returncode, stderr)
+            QMessageBox.warning(
+                self,
+                "ADB 端口转发失败",
+                f"执行 adb forward 失败：\n{stderr}\n\n"
+                "排查建议：\n"
+                "1) 手机通过 USB 数据线连接电脑\n"
+                "2) 手机开启 USB 调试（开发者选项）\n"
+                "3) 首次连接时在手机上点击「允许 USB 调试」\n",
+            )
+            return False
+        except FileNotFoundError:
+            logger.warning("adb 未找到，请确认已安装 Android SDK Platform-Tools")
+            QMessageBox.warning(
+                self,
+                "未找到 ADB",
+                "未找到 adb 命令。\n\n"
+                "请安装 Android SDK Platform-Tools 并确保 adb 在 PATH 中。\n"
+                "下载地址：https://developer.android.com/tools/releases/platform-tools",
+            )
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("adb forward 超时")
+            QMessageBox.warning(self, "ADB 超时", "adb forward 执行超时，请检查 USB 连接。")
+            return False
+
+    def _open_capture(self, cam_id):
         """
         打开摄像头。
 
-        macOS 上优先使用 AVFoundation 后端（对“连续互通相机”等更友好）。
+        cam_id 可以是：
+        - int: 本地摄像头索引（0, 1, 2...）
+        - str: MJPEG 流 URL（如 http://localhost:8080）
+
+        本地摄像头：
+        - Windows 优先使用 DirectShow 后端（更快更稳定）
+        - macOS 优先使用 AVFoundation 后端（对"连续互通相机"等更友好）
         """
 
-        if sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
+        # MJPEG 流 URL：直接用 OpenCV 打开
+        if isinstance(cam_id, str):
+            logger.info("打开 MJPEG 流：%s", cam_id)
+            return cv2.VideoCapture(cam_id)
+
+        if sys.platform == "win32" and hasattr(cv2, "CAP_DSHOW"):
+            cap = cv2.VideoCapture(cam_id, cv2.CAP_DSHOW)
+            try:
+                if cap is not None and cap.isOpened():
+                    return cap
+            except Exception:
+                pass
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+        elif sys.platform == "darwin" and hasattr(cv2, "CAP_AVFOUNDATION"):
             cap = cv2.VideoCapture(cam_id, cv2.CAP_AVFOUNDATION)
             try:
                 if cap is not None and cap.isOpened():
@@ -597,9 +669,22 @@ class MainWindow(QMainWindow):
         """连接/断开摄像头"""
         if self.cap is None:
             cam_id = self.cam_combo.currentData()
-            if cam_id is None or cam_id < 0:
+            if cam_id is None:
                 QMessageBox.warning(self, "错误", "请先选择有效的摄像头")
                 return
+            # int 类型的 cam_id 需 >= 0；str 类型为 MJPEG URL
+            if isinstance(cam_id, int) and cam_id < 0:
+                QMessageBox.warning(self, "错误", "请先选择有效的摄像头")
+                return
+
+            is_mjpeg = isinstance(cam_id, str)
+            if is_mjpeg:
+                self.statusBar().showMessage("正在设置 ADB 端口转发...")
+                QApplication.processEvents()
+                if not self._adb_forward():
+                    return
+                self.statusBar().showMessage(f"正在连接手机摄像头 {cam_id} ...")
+                QApplication.processEvents()
 
             self.cap = self._open_capture(cam_id)
 
@@ -618,15 +703,25 @@ class MainWindow(QMainWindow):
                 if not ok:
                     self.cap.release()
                     self.cap = None
-                    QMessageBox.warning(
-                        self,
-                        "摄像头无画面",
-                        "摄像头已打开，但读取不到画面。\n\n"
-                        "排查建议：\n"
-                        "1) macOS：系统设置 -> 隐私与安全 -> 相机，允许当前运行的终端/应用访问\n"
-                        "2) 连续互通相机：保持 iPhone 解锁并靠近 Mac，且未被其他应用占用\n"
-                        "3) 依次切换“摄像头 0/1/2”尝试\n",
-                    )
+                    if is_mjpeg:
+                        QMessageBox.warning(
+                            self,
+                            "手机摄像头无画面",
+                            "已连接但读取不到画面。\n\n"
+                            "排查建议：\n"
+                            "1) 确认手机端 App 已点击「启动」\n"
+                            "2) 确认已执行：adb forward tcp:8080 tcp:8080\n"
+                            "3) 检查 USB 线是否为数据线（非纯充电线）\n",
+                        )
+                    else:
+                        QMessageBox.warning(
+                            self,
+                            "摄像头无画面",
+                            "摄像头已打开，但读取不到画面。\n\n"
+                            "排查建议：\n"
+                            "1) 确认摄像头未被其他应用占用\n"
+                            "2) 依次切换「摄像头 0/1/2」尝试\n",
+                        )
                     return
 
                 self.timer.start(30)  # ~33 FPS
@@ -636,16 +731,27 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("摄像头已连接")
             else:
                 self.cap = None
-                QMessageBox.warning(
-                    self,
-                    "无法打开摄像头",
-                    "无法打开摄像头。\n\n"
-                    "排查建议：\n"
-                    "1) macOS：系统设置 -> 隐私与安全 -> 相机，允许当前运行的终端/应用访问\n"
-                    "2) 如果有其他应用正在使用摄像头（微信/会议软件/浏览器），请先退出再试\n"
-                    "3) 连续互通相机：保持 iPhone 解锁并靠近 Mac，且未被其他应用占用\n"
-                    "4) 在下拉框中切换不同编号（0/1/2/3...）重试\n",
-                )
+                if is_mjpeg:
+                    QMessageBox.warning(
+                        self,
+                        "无法连接手机摄像头",
+                        f"无法连接 {cam_id}\n\n"
+                        "排查步骤：\n"
+                        "1) 手机通过 USB 数据线连接电脑\n"
+                        "2) 手机开启 USB 调试（开发者选项）\n"
+                        "3) 手机端 App 点击「启动」\n"
+                        "4) 电脑终端执行：adb forward tcp:8080 tcp:8080\n"
+                        "5) 再点击「连接」\n",
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "无法打开摄像头",
+                        "无法打开摄像头。\n\n"
+                        "排查建议：\n"
+                        "1) 确认摄像头未被其他应用占用\n"
+                        "2) 在下拉框中切换不同编号重试\n",
+                    )
         else:
             self.timer.stop()
             self.cap.release()
