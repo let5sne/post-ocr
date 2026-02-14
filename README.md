@@ -7,7 +7,7 @@
 - 自动识别信封图片中的文字信息
 - 结构化提取：编号、邮编、地址、联系人、电话
 - 支持批量处理，结果导出为 Excel
-- 提供 Web 界面，操作简单
+- 提供桌面应用，支持摄像头实时拍照识别
 
 ## 系统要求
 
@@ -41,76 +41,51 @@ python src/main.py
 # 结果保存在 data/output/result.xlsx
 ```
 
-**Web 界面**
+**桌面应用**
 ```bash
-streamlit run src/app.py --server.port 8501
+python src/desktop.py
 
-# 浏览器访问 http://localhost:8501
+# 启动 PyQt6 窗口，可选择摄像头实时拍照识别
 ```
 
-## 部署方案
+---
 
-### 方案一：内网服务器部署（推荐）
+## Windows 桌面离线版（zip 目录包）
 
-适合多人使用，有内网环境的工厂。
+本项目桌面版入口为 `src/desktop.py`（PyQt6 + OpenCV），适合现场工位离线使用。
 
-```bash
-# 启动服务（监听所有网卡）
-streamlit run src/app.py --server.address 0.0.0.0 --server.port 8501
-
-# 工人通过浏览器访问: http://服务器IP:8501
-```
-
-### 方案二：Docker 容器化部署
-
-适合需要隔离环境或快速部署的场景。
+### 1. 准备离线模型（在有网机器执行一次）
 
 ```bash
-# 构建镜像
-docker build -t envelope-ocr .
-
-# 运行容器
-docker run -d -p 8501:8501 --name envelope-ocr envelope-ocr
+pip install -r requirements.txt
+python scripts/prepare_models.py --models-dir models
 ```
 
-Dockerfile:
-```dockerfile
-FROM python:3.10-slim
-RUN apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0 && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir -r requirements.txt
-EXPOSE 8501
-CMD ["streamlit", "run", "src/app.py", "--server.address", "0.0.0.0"]
+执行完成后会生成 `models/whl/...` 目录结构；该 `models/` 目录需要与最终的 exe 同级分发。
+
+### 2. Windows 打包（建议使用 PyInstaller 的 onedir）
+
+请在 Windows 机器上构建 Windows 包（不要跨平台交叉打包）。
+
+```powershell
+pip install -r requirements.txt
+pip install pyinstaller
+
+pyinstaller --noconfirm --clean --windowed --onedir `
+  --name "post-ocr-desktop" `
+  --paths "src" `
+  --collect-all "Cython" `
+  --collect-all "paddleocr" `
+  --collect-all "paddle" `
+  --add-data "models;models" `
+  "src/desktop.py"
 ```
 
-### 方案三：系统服务（开机自启）
+打包完成后，将 `dist\post-ocr-desktop\` 整个目录压缩为 zip 交付即可。
 
-适合长期稳定运行的生产环境。
-
-创建服务文件 `/etc/systemd/system/envelope-ocr.service`:
-```ini
-[Unit]
-Description=Envelope OCR Service
-After=network.target
-
-[Service]
-User=www-data
-WorkingDirectory=/opt/post-ocr
-ExecStart=/usr/bin/streamlit run src/app.py --server.address 0.0.0.0 --server.port 8501
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-启用服务:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable envelope-ocr
-sudo systemctl start envelope-ocr
-```
+注意：
+- 本项目默认使用 PaddleOCR 2.10.0（PP-OCRv4 中文）离线模型目录结构
+- 若 `models/` 缺失，程序会直接报错提示，避免触发联网下载
 
 ## 目录结构
 
@@ -121,7 +96,7 @@ post-ocr/
 │   └── output/         # 结果 Excel 及处理日志
 ├── src/
 │   ├── main.py         # 命令行入口
-│   ├── app.py          # Web 界面
+│   ├── desktop.py      # 桌面应用入口
 │   └── processor.py    # 核心处理逻辑
 ├── requirements.txt
 └── README.md
@@ -130,7 +105,7 @@ post-ocr/
 ## 技术栈
 
 - OCR 引擎: PaddleOCR 2.10 (PP-OCRv4)
-- Web 框架: Streamlit
+- 桌面框架: PyQt6
 - 数据处理: Pandas
 
 ## 常见问题

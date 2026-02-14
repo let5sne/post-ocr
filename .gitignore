@@ -21,6 +21,10 @@ htmlcov/
 .venv/
 venv/
 .env
+.serena/
+models/*
+!models/.gitkeep
+usb_bundle/
 
 # ==================================================
 # Android - 构建产物

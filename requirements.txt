@@ -1,4 +1,4 @@
-# OCR 核心依赖
+# 桌面版依赖（本地电脑安装）
 paddleocr>=2.6,<3
 paddlepaddle>=2.5,<3
 
@@ -6,14 +6,5 @@ paddlepaddle>=2.5,<3
 pandas
 openpyxl
 pydantic
-tqdm
-
-# Web 界面
-streamlit
-
-# 桌面版依赖
-PyQt6>=6.6.0
-opencv-python>=4.8.0
-
-# 打包工具（仅开发时需要）
-pyinstaller>=6.0.0
+PyQt6
+opencv-python
