@@ -1,21 +1,16 @@
 package com.usbwebcam
 
+import android.content.ContentValues
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.hardware.camera2.*
-import android.media.Image
+import android.graphics.ImageFormat
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.provider.MediaStore
 import android.util.Size
-import android.view.Surface
 import android.view.SurfaceHolder
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -28,6 +23,9 @@ class CameraHelper(
     private var imageReader: ImageReader? = null
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
+
+    @Volatile
+    private var latestJpeg: ByteArray? = null
 
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val cameraId = cameraManager.cameraIdList.firstOrNull {
@@ -84,7 +82,6 @@ class CameraHelper(
 
     private fun createCameraPreviewSession() {
         try {
-            // 获取支持的尺寸
             val characteristics = cameraManager.getCameraCharacteristics(cameraId)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             val previewSize = map?.getOutputSizes(SurfaceHolder::class.java)?.firstOrNull {
@@ -125,26 +122,47 @@ class CameraHelper(
             val buffer = image.planes[0].buffer
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
+            latestJpeg = bytes
             onFrame(bytes, image.width, image.height)
         } finally {
             image.close()
         }
     }
 
-    fun captureAndSave() {
-        // 保存最后一帧
-        imageReader?.acquireLatestImage()?.use { image ->
-            val buffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining())
-            buffer.get(bytes)
+    /**
+     * 保存最新一帧到系统相册，返回是否成功
+     */
+    fun captureAndSave(): Boolean {
+        val jpeg = latestJpeg ?: return false
 
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-            val file = File(
-                context.getExternalFilesDir(null),
-                "envelope_$timestamp.jpg"
-            )
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val filename = "envelope_$timestamp.jpg"
 
-            FileOutputStream(file).use { it.write(bytes) }
+        val contentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/信封拍照")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+        }
+
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            ?: return false
+
+        return try {
+            resolver.openOutputStream(uri)?.use { it.write(jpeg) }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                contentValues.clear()
+                contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, contentValues, null, null)
+            }
+            true
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            e.printStackTrace()
+            false
         }
     }
 
@@ -156,25 +174,15 @@ class CameraHelper(
             e.printStackTrace()
         }
 
-        try {
-            captureSession?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { captureSession?.close() } catch (_: Exception) {}
         captureSession = null
 
-        try {
-            imageReader?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { imageReader?.close() } catch (_: Exception) {}
         imageReader = null
 
-        try {
-            cameraDevice?.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { cameraDevice?.close() } catch (_: Exception) {}
         cameraDevice = null
+
+        latestJpeg = null
     }
 }

@@ -11,7 +11,7 @@
     <application
         android:allowBackup="true"
         android:label="USB摄像头"
-        android:theme="@style/Theme.AppCompat.NoActionBar">
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 
         <activity
             android:name=".MainActivity"

@@ -3,12 +3,14 @@ package com.usbwebcam
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.View
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import java.net.NetworkInterface
 
 class MainActivity : AppCompatActivity() {
     private var mjpegServer: MjpegServer? = null
@@ -28,29 +30,24 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        val btnStart = findViewById<Button>(R.id.btn_start)
-        val btnStop = findViewById<Button>(R.id.btn_stop)
-        val btnCapture = findViewById<Button>(R.id.btn_capture)
-        val tvStatus = findViewById<TextView>(R.id.tv_status)
-
-        btnStart.setOnClickListener {
+        findViewById<Button>(R.id.btn_start).setOnClickListener {
             if (checkPermission()) {
                 startCamera()
             }
         }
 
-        btnStop.setOnClickListener {
+        findViewById<Button>(R.id.btn_stop).setOnClickListener {
             stopCamera()
         }
 
-        btnCapture.setOnClickListener {
-            cameraHelper?.captureAndSave()
-            Toast.makeText(this, "图片已保存到相册", Toast.LENGTH_SHORT).show()
+        findViewById<Button>(R.id.btn_capture).setOnClickListener {
+            val saved = cameraHelper?.captureAndSave() == true
+            val msg = if (saved) "图片已保存到相册" else "保存失败，请先启动服务"
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
         }
 
         if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
+                this, Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
         ) {
             startCamera()
@@ -59,8 +56,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkPermission(): Boolean {
         return if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.CAMERA
+                this, Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
         ) {
             true
@@ -70,6 +66,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun getDeviceIp(): String {
+        try {
+            NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { intf ->
+                intf.inetAddresses?.toList()?.forEach { addr ->
+                    if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
+                        return addr.hostAddress ?: "未知"
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return "未知"
+    }
+
     private fun startCamera() {
         if (cameraHelper != null) return
 
@@ -77,17 +86,23 @@ class MainActivity : AppCompatActivity() {
         cameraHelper = CameraHelper(this) { frame, _, _ ->
             mjpegServer?.updateFrame(frame)
         }
-        
-        // Start the server and update UI once started
+
         mjpegServer?.start {
             runOnUiThread {
-                findViewById<TextView>(R.id.tv_status).text = """
-                    服务运行中
-                    端口: 8080
-                    IP: 无需IP (ADB模式)
-                    USB连接命令:
-                    adb forward tcp:8080 tcp:8080
-                """.trimIndent()
+                val ip = getDeviceIp()
+                findViewById<TextView>(R.id.tv_status).text =
+                    "● 服务运行中\n\n" +
+                    "端口: 8080\n" +
+                    "设备IP: $ip\n\n" +
+                    "USB连接 (推荐):\n" +
+                    "  adb forward tcp:8080 tcp:8080\n\n" +
+                    "WiFi连接:\n" +
+                    "  http://$ip:8080"
+
+                findViewById<TextView>(R.id.tv_ip).apply {
+                    text = "在电脑端浏览器打开上述地址即可查看画面"
+                    visibility = View.VISIBLE
+                }
                 findViewById<Button>(R.id.btn_start).isEnabled = false
                 findViewById<Button>(R.id.btn_stop).isEnabled = true
             }
@@ -104,6 +119,7 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             findViewById<TextView>(R.id.tv_status).text = "服务已停止"
+            findViewById<TextView>(R.id.tv_ip).visibility = View.GONE
             findViewById<Button>(R.id.btn_start).isEnabled = true
             findViewById<Button>(R.id.btn_stop).isEnabled = false
         }
