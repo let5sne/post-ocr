@@ -8,6 +8,7 @@
   ├── _internal/          (运行时依赖)
   └── models/             (OCR 模型，需提前通过 prepare_models.py 准备)
 """
+import os
 import subprocess
 import sys
 import shutil
@@ -15,6 +16,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
 DIST_NAME = "信封信息提取系统"
+
+# paddle DLLs 所在目录（mklml.dll 等不会被 PyInstaller 自动收集）
+import paddle as _paddle
+PADDLE_LIBS = str(Path(_paddle.__file__).parent / "libs")
 
 
 def build(debug=False):
@@ -39,6 +44,10 @@ def build(debug=False):
         "--hidden-import=ocr_offline",
         "--hidden-import=paddleocr",
         "--hidden-import=paddle",
+        # --- paddle DLLs（mklml.dll 等不会被自动收集） ---
+        f"--add-binary={PADDLE_LIBS}/*.dll{os.pathsep}paddle/libs",
+        # --- runtime hook: stub 掉 paddle 开发模块，避免 Cython 缺文件崩溃 ---
+        "--runtime-hook=rthook_paddle.py",
         # --- 收集 paddleocr 全部数据（模型配置、字典等） ---
         "--collect-all=paddleocr",
         # --- 元数据（部分库在运行时通过 importlib.metadata 查版本） ---

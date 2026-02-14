@@ -11,8 +11,41 @@ from __future__ import annotations
 
 import os
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 import logging
+
+
+def _ensure_ascii_model_dir(model_dir: Path) -> str:
+    """
+    PaddlePaddle C++ 推理引擎在 Windows 上不支持非 ASCII 路径。
+    如果模型路径含非 ASCII 字符，复制到临时目录（仅首次复制，后续复用）。
+    """
+    s = str(model_dir)
+    try:
+        s.encode("ascii")
+        return s  # 纯 ASCII，直接用
+    except UnicodeEncodeError:
+        pass
+
+    # 路径含非 ASCII，复制到 %TEMP%/post_ocr_models/<子目录名>
+    safe_base = Path(tempfile.gettempdir()) / "post_ocr_models"
+    safe_dir = safe_base / model_dir.name
+
+    # 用 pdmodel 文件大小做简单校验，避免每次都复制
+    src_marker = model_dir / "inference.pdmodel"
+    dst_marker = safe_dir / "inference.pdmodel"
+    if dst_marker.exists() and dst_marker.stat().st_size == src_marker.stat().st_size:
+        return str(safe_dir)
+
+    # 复制模型
+    log = logging.getLogger("post_ocr.ocr")
+    log.info("模型路径含非ASCII字符，复制到: %s", safe_dir)
+    if safe_dir.exists():
+        shutil.rmtree(safe_dir)
+    shutil.copytree(model_dir, safe_dir)
+    return str(safe_dir)
 
 
 def _is_frozen() -> bool:
@@ -94,8 +127,9 @@ def create_offline_ocr(models_base_dir: Path | None = None):
 
     if (det_dir / "inference.pdmodel").exists() and (rec_dir / "inference.pdmodel").exists():
         log.info("使用离线模型: %s", models_dir)
-        kwargs["det_model_dir"] = str(det_dir)
-        kwargs["rec_model_dir"] = str(rec_dir)
+        kwargs["det_model_dir"] = _ensure_ascii_model_dir(det_dir)
+        kwargs["rec_model_dir"] = _ensure_ascii_model_dir(rec_dir)
+        log.info("det_model_dir=%s, rec_model_dir=%s", kwargs["det_model_dir"], kwargs["rec_model_dir"])
     else:
         log.info("未找到离线模型，将使用默认路径（可能需要联网下载）")
 
