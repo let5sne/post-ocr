@@ -1,8 +1,0 @@
-# 桌面版依赖（本地电脑安装）
-paddleocr>=2.6,<3
-paddlepaddle>=2.5,<3
-pandas
-openpyxl
-pydantic
-PyQt6
-opencv-python
