@@ -1147,6 +1147,7 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    mp.freeze_support()
     log_file = setup_logging()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
