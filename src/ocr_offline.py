@@ -118,7 +118,21 @@ def create_offline_ocr(models_base_dir: Path | None = None):
     from paddleocr import PaddleOCR
 
     # 构建 PaddleOCR 参数
+    # 说明：在部分 macOS/CPU 环境下，oneDNN(MKLDNN) 可能出现卡住，默认关闭以换取稳定性。
     kwargs = dict(lang="ch", use_angle_cls=False, show_log=False)
+    disable_mkldnn = os.environ.get("POST_OCR_DISABLE_MKLDNN", "1").strip() == "1"
+    if disable_mkldnn:
+        os.environ["FLAGS_use_mkldnn"] = "0"
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        kwargs["enable_mkldnn"] = False
+        try:
+            kwargs["cpu_threads"] = max(
+                1, int(os.environ.get("POST_OCR_CPU_THREADS", "1").strip() or "1")
+            )
+        except Exception:
+            kwargs["cpu_threads"] = 1
 
     # 如果 models/ 目录存在离线模型，显式指定路径（打包分发场景）
     models_dir = models_base_dir or get_models_base_dir()
@@ -134,6 +148,12 @@ def create_offline_ocr(models_base_dir: Path | None = None):
         log.info("未找到离线模型，将使用默认路径（可能需要联网下载）")
 
     log.info("create_offline_ocr: creating PaddleOCR(lang=ch)")
-    ocr = PaddleOCR(**kwargs)
+    try:
+        ocr = PaddleOCR(**kwargs)
+    except TypeError:
+        # 兼容个别 PaddleOCR 版本不支持的参数
+        kwargs.pop("enable_mkldnn", None)
+        kwargs.pop("cpu_threads", None)
+        ocr = PaddleOCR(**kwargs)
     log.info("create_offline_ocr: PaddleOCR created")
     return ocr

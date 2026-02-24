@@ -40,15 +40,31 @@ def main():
 
             # 2. 提取文字行
             ocr_texts = []
+            ocr_lines = []
             if result and result[0]:
                 for line in result[0]:
                     # line 格式: [box, (text, confidence)]
                     if line and len(line) >= 2:
-                        ocr_texts.append(line[1][0])
+                        text = str(line[1][0])
+                        ocr_texts.append(text)
+                        conf = None
+                        try:
+                            conf = float(line[1][1])
+                        except Exception:
+                            conf = None
+                        ocr_lines.append(
+                            {
+                                "text": text,
+                                "box": line[0],
+                                "conf": conf,
+                                "source": "main",
+                                "roi_index": 0,
+                            }
+                        )
 
             # 3. 结构化解析
             if ocr_texts:
-                record = extract_info(ocr_texts)
+                record = extract_info(ocr_lines if ocr_lines else ocr_texts)
                 all_records.append(record)
             else:
                 errors.append(

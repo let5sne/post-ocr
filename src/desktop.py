@@ -11,6 +11,7 @@ import time
 import logging
 import threading
 import queue
+import multiprocessing as mp
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -24,8 +25,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap, QFont, QAction, QKeySequence, QShortcut
 
-from processor import extract_info
-from ocr_offline import create_offline_ocr, get_models_base_dir
+from ocr_offline import get_models_base_dir
+from ocr_worker_process import run_ocr_worker
 
 logger = logging.getLogger("post_ocr.desktop")
 
@@ -70,12 +71,12 @@ def setup_logging() -> Path:
 
 class OCRService(QObject):
     """
-    OCR 后台服务（运行在标准 Python 线程内）。
+    OCR 后台服务（运行在独立子进程中）。
 
     关键点：
-    - 避免使用 QThread：在 macOS 上，QThread(Dummy-*) 内 import paddleocr 可能卡死
-    - PaddleOCR 实例在后台线程内创建并使用，避免跨线程调用导致卡死/死锁
-    - 单线程串行处理任务：避免并发推理挤爆内存或引发底层库竞争
+    - PaddleOCR 初始化与推理都放到子进程，避免阻塞 UI 主进程
+    - 主进程只做任务投递与结果回调
+    - 子进程异常或卡住时，可通过重启服务恢复
     """
 
     finished = pyqtSignal(int, dict, list)
@@ -87,11 +88,20 @@ class OCRService(QObject):
     def __init__(self, models_base_dir: Path):
         super().__init__()
         self._models_base_dir = models_base_dir
-        self._ocr = None
         self._busy = False
         self._stop_event = threading.Event()
-        self._queue: "queue.Queue[tuple[int, object] | None]" = queue.Queue()
-        self._thread = threading.Thread(target=self._run, name="OCRThread", daemon=True)
+        method_default = "fork" if sys.platform == "darwin" else "spawn"
+        method = os.environ.get("POST_OCR_MP_START_METHOD", method_default).strip() or method_default
+        try:
+            self._ctx = mp.get_context(method)
+        except ValueError:
+            method = method_default
+            self._ctx = mp.get_context(method_default)
+        logger.info("OCR multiprocessing start_method=%s", method)
+        self._req_q = None
+        self._resp_q = None
+        self._proc = None
+        self._reader_thread = None
 
     def _set_busy(self, busy: bool) -> None:
         if self._busy != busy:
@@ -99,118 +109,152 @@ class OCRService(QObject):
             self.busy_changed.emit(busy)
 
     def start(self) -> None:
-        """启动后台线程并执行 warmup。"""
+        """启动 OCR 子进程与响应监听线程。"""
 
-        self._thread.start()
+        self._stop_event.clear()
+        self._req_q = self._ctx.Queue(maxsize=1)
+        self._resp_q = self._ctx.Queue()
+        self._proc = self._ctx.Process(
+            target=run_ocr_worker,
+            args=(str(self._models_base_dir), self._req_q, self._resp_q),
+            name="OCRProcess",
+            daemon=True,
+        )
+        self._proc.start()
+        self._reader_thread = threading.Thread(
+            target=self._read_responses,
+            name="OCRRespReader",
+            daemon=True,
+        )
+        self._reader_thread.start()
 
     def stop(self, timeout_ms: int = 8000) -> bool:
-        """请求停止后台线程并等待退出（后台线程为 daemon，退出失败也不阻塞进程）。"""
+        """停止 OCR 子进程与监听线程。"""
 
         try:
             self._stop_event.set()
-            # 用 sentinel 唤醒阻塞在 queue.get() 的线程
             try:
-                self._queue.put_nowait(None)
+                if self._req_q is not None:
+                    self._req_q.put_nowait(None)
             except Exception:
                 pass
-            self._thread.join(timeout=max(0.0, timeout_ms / 1000.0))
-            return not self._thread.is_alive()
+            if self._reader_thread is not None:
+                self._reader_thread.join(timeout=max(0.0, timeout_ms / 1000.0))
+
+            proc_alive = False
+            if self._proc is not None:
+                self._proc.join(timeout=max(0.0, timeout_ms / 1000.0))
+                if self._proc.is_alive():
+                    proc_alive = True
+                    self._proc.terminate()
+                    self._proc.join(timeout=1.0)
+
+            self._set_busy(False)
+            return not proc_alive
         except Exception:
+            self._set_busy(False)
             return False
+        finally:
+            self._proc = None
+            self._reader_thread = None
+            self._req_q = None
+            self._resp_q = None
 
-    def _ensure_ocr(self) -> None:
-        if self._ocr is None:
-            logger.info("OCR ensure_ocr: 开始创建 PaddleOCR（线程=%s）", threading.current_thread().name)
-            self._ocr = create_offline_ocr(models_base_dir=self._models_base_dir)
-            logger.info("OCR ensure_ocr: PaddleOCR 创建完成")
-            self.ready.emit()
-
-    def _warmup(self) -> None:
-        """提前加载 OCR 模型，避免首次识别时才初始化导致“像卡死”"""
-
-        logger.info("OCR 预热开始（线程=%s）", threading.current_thread().name)
-        self._ensure_ocr()
-        logger.info("OCR 预热完成")
-
-    def _run(self) -> None:
-        try:
-            self._warmup()
-        except Exception as e:
-            logger.exception("OCR 预热失败：%s", str(e))
-            self.init_error.emit(str(e))
-            return
-
+    def _read_responses(self) -> None:
+        """读取 OCR 子进程响应并转发为 Qt 信号。"""
         while not self._stop_event.is_set():
-            item = None
             try:
-                item = self._queue.get()
-            except Exception:
+                if self._resp_q is None:
+                    return
+                msg = self._resp_q.get(timeout=0.2)
+            except queue.Empty:
                 continue
+            except Exception:
+                if not self._stop_event.is_set():
+                    self.init_error.emit("OCR 子进程通信失败")
+                return
 
-            if item is None:
-                # sentinel: stop
-                break
-
-            job_id, images = item
-            if self._stop_event.is_set():
-                break
-            self._process_job(job_id, images)
+            if not isinstance(msg, dict):
+                continue
+            msg_type = str(msg.get("type", "")).strip()
+            if msg_type == "progress":
+                job_id = msg.get("job_id", "-")
+                stage = msg.get("stage", "")
+                extra = []
+                if "images" in msg:
+                    extra.append(f"images={msg.get('images')}")
+                if "texts" in msg:
+                    extra.append(f"texts={msg.get('texts')}")
+                suffix = f" ({', '.join(extra)})" if extra else ""
+                logger.info("OCR 子进程进度 job=%s stage=%s%s", job_id, stage, suffix)
+                continue
+            if msg_type == "ready":
+                logger.info("OCR 子进程已就绪 pid=%s", getattr(self._proc, "pid", None))
+                self.ready.emit()
+                continue
+            if msg_type == "init_error":
+                self._set_busy(False)
+                self.init_error.emit(str(msg.get("error", "OCR 初始化失败")))
+                continue
+            if msg_type == "result":
+                self._set_busy(False)
+                try:
+                    job_id = int(msg.get("job_id"))
+                except Exception:
+                    job_id = -1
+                record = msg.get("record") if isinstance(msg.get("record"), dict) else {}
+                texts = msg.get("texts") if isinstance(msg.get("texts"), list) else []
+                self.finished.emit(job_id, record, texts)
+                continue
+            if msg_type == "error":
+                self._set_busy(False)
+                try:
+                    job_id = int(msg.get("job_id"))
+                except Exception:
+                    job_id = -1
+                self.error.emit(job_id, str(msg.get("error", "OCR 处理失败")))
+                continue
 
     @pyqtSlot(int, object)
     def process(self, job_id: int, images: object) -> None:
-        """接收 UI 请求：把任务放进队列，由后台线程串行处理。"""
+        """接收 UI 请求并投递到 OCR 子进程。"""
 
         if self._stop_event.is_set():
             self.error.emit(job_id, "OCR 服务正在关闭，请稍后重试。")
             return
-        # 忙碌或已有排队任务时，直接拒绝，避免积压导致“看起来一直在识别”
-        if self._busy or (not self._queue.empty()):
+        if self._proc is None or (not self._proc.is_alive()):
+            self.error.emit(job_id, "OCR 服务未就绪，请稍后重试。")
+            return
+        if self._busy:
             self.error.emit(job_id, "OCR 正在进行中，请稍后再试。")
             return
+        if not isinstance(images, (list, tuple)) or len(images) == 0:
+            self.error.emit(job_id, "内部错误：未传入有效图片数据")
+            return
         try:
-            # 注意：这里不做耗时工作，只入队，避免阻塞 UI
-            self._queue.put_nowait((job_id, images))
-        except Exception as e:
-            self.error.emit(job_id, f"OCR 入队失败：{str(e)}")
-
-    def _process_job(self, job_id: int, images: object) -> None:
-        self._set_busy(True)
-        try:
-            self._ensure_ocr()
-            if not isinstance(images, (list, tuple)) or len(images) == 0:
-                raise ValueError("内部错误：未传入有效图片数据")
-
             shapes = []
-            for img in images:
+            for item in images:
+                img = item
+                source = "main"
+                if isinstance(item, dict):
+                    img = item.get("img")
+                    source = str(item.get("source", "main"))
                 try:
-                    shapes.append(getattr(img, "shape", None))
+                    shapes.append({"source": source, "shape": getattr(img, "shape", None)})
                 except Exception:
-                    shapes.append(None)
-            logger.info("OCR job=%s 开始，images=%s", job_id, shapes)
+                    shapes.append({"source": source, "shape": None})
+            logger.info("OCR job=%s 投递到子进程，images=%s", job_id, shapes)
 
-            ocr_texts: list[str] = []
-            for img in images:
-                if img is None:
-                    continue
-                result = self._ocr.ocr(img, cls=False)
-                if result and result[0]:
-                    for line in result[0]:
-                        if line and len(line) >= 2:
-                            ocr_texts.append(line[1][0])
-
-            record = extract_info(ocr_texts)
-            logger.info(
-                "OCR job=%s 完成，lines=%s, record_keys=%s",
-                job_id,
-                len(ocr_texts),
-                list(record.keys()),
-            )
-            self.finished.emit(job_id, record, ocr_texts)
-        except Exception as e:
-            logger.exception("OCR job=%s 失败：%s", job_id, str(e))
-            self.error.emit(job_id, str(e))
-        finally:
+            self._set_busy(True)
+            if self._req_q is None:
+                raise RuntimeError("OCR 请求队列不可用")
+            self._req_q.put_nowait((int(job_id), list(images)))
+        except queue.Full:
             self._set_busy(False)
+            self.error.emit(job_id, "OCR 队列已满，请稍后再试。")
+        except Exception as e:
+            self._set_busy(False)
+            self.error.emit(job_id, f"OCR 入队失败：{str(e)}")
 
 
 class MainWindow(QMainWindow):
@@ -223,17 +267,22 @@ class MainWindow(QMainWindow):
 
         # OCR 工作线程（避免 UI 卡死）
         self._ocr_job_id = 0
+        self._ocr_pending_job_id = None
         self._ocr_start_time_by_job: dict[int, float] = {}
         self._ocr_ready = False
         self._ocr_busy = False
         self._shutting_down = False
         self._ocr_timeout_prompted = False
+        self._ocr_restarting = False
 
         # 摄像头
         self.cap = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self._frame_fail_count = 0
+        self._last_frame = None
+        self._last_frame_ts = 0.0
+        self._capture_in_progress = False
 
         # 状态栏进度（识别中显示）
         self._progress = QProgressBar()
@@ -252,17 +301,44 @@ class MainWindow(QMainWindow):
         self.init_ui()
         self.load_cameras()
 
-        # 主线程预加载：在 macOS 上，必须在主线程 import paddleocr，否则后台线程会卡死
-        self.statusBar().showMessage("正在加载 OCR 模块...")
-        QApplication.processEvents()
-        try:
-            logger.info("主线程预加载：import paddleocr")
-            import paddleocr  # noqa: F401
-            logger.info("主线程预加载：paddleocr 导入完成")
-        except Exception as e:
-            logger.error("主线程预加载失败：%s", e, exc_info=True)
-            QMessageBox.critical(self, "启动失败", f"无法加载 OCR 模块：{e}")
-            raise
+        # 历史上主线程直接 import paddleocr 偶发卡死。
+        # 默认跳过该步骤，避免 UI 被阻塞；如需诊断可打开轻量预检（子进程 + 超时）。
+        if os.environ.get("POST_OCR_PRECHECK_IMPORT", "0").strip() == "1":
+            timeout_sec = 8
+            try:
+                timeout_sec = max(
+                    2,
+                    int(
+                        os.environ.get("POST_OCR_PRECHECK_TIMEOUT_SEC", "8").strip()
+                        or "8"
+                    ),
+                )
+            except Exception:
+                timeout_sec = 8
+            self.statusBar().showMessage("正在预检 OCR 模块...")
+            QApplication.processEvents()
+            try:
+                logger.info("OCR 预检开始（子进程，timeout=%ss）", timeout_sec)
+                proc = subprocess.run(
+                    [sys.executable, "-c", "import paddleocr"],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
+                if proc.returncode == 0:
+                    logger.info("OCR 预检通过")
+                else:
+                    logger.warning(
+                        "OCR 预检失败（rc=%s）：%s",
+                        proc.returncode,
+                        (proc.stderr or "").strip(),
+                    )
+            except subprocess.TimeoutExpired:
+                logger.warning("OCR 预检超时（%ss），跳过预检继续启动。", timeout_sec)
+            except Exception as e:
+                logger.warning("OCR 预检异常：%s（忽略并继续）", str(e))
+        else:
+            logger.info("已跳过主线程 OCR 预检（POST_OCR_PRECHECK_IMPORT=0）")
 
         # OCR 服务放在 UI 初始化之后启动，避免 ready/busy 信号回调时 btn_capture 尚未创建
         self.statusBar().showMessage("正在启动 OCR 服务...")
@@ -308,6 +384,8 @@ class MainWindow(QMainWindow):
         self._ocr_ready = False
         self._ocr_busy = False
         self._ocr_timeout_prompted = False
+        self._ocr_pending_job_id = None
+        self._ocr_start_time_by_job.clear()
         try:
             self._progress.setVisible(False)
         except Exception:
@@ -316,10 +394,13 @@ class MainWindow(QMainWindow):
         try:
             svc = getattr(self, "_ocr_service", None)
             if svc is not None:
+                try:
+                    self.request_ocr.disconnect(svc.process)
+                except Exception:
+                    pass
                 ok = svc.stop(timeout_ms=8000 if force else 3000)
                 if (not ok) and force:
-                    # Python 线程无法可靠“强杀”，这里只做提示并继续退出流程。
-                    logger.warning("OCR 服务停止超时：后台线程可能仍在运行，建议重启应用。")
+                    logger.warning("OCR 服务停止超时：子进程可能仍在退出中，建议重启应用。")
         except Exception:
             pass
 
@@ -333,9 +414,15 @@ class MainWindow(QMainWindow):
 
         if self._shutting_down:
             return
-        self.statusBar().showMessage("正在重启 OCR 服务...")
-        self._stop_ocr_service(force=True)
-        self._init_ocr_service()
+        if self._ocr_restarting:
+            return
+        self._ocr_restarting = True
+        try:
+            self.statusBar().showMessage("正在重启 OCR 服务...")
+            self._stop_ocr_service(force=True)
+            self._init_ocr_service()
+        finally:
+            self._ocr_restarting = False
 
     def _init_ocr_service(self) -> None:
         models_dir = get_models_base_dir()
@@ -347,7 +434,7 @@ class MainWindow(QMainWindow):
 
         self._ocr_service = OCRService(models_base_dir=models_dir)
 
-        # 注意：OCRService 内部使用 Python 线程做 warmup 与推理。
+        # 注意：OCRService 内部使用独立子进程做 warmup 与推理。
         # 这里强制使用 QueuedConnection，确保 UI 回调始终在主线程执行。
         self.request_ocr.connect(self._ocr_service.process, Qt.ConnectionType.QueuedConnection)
         self._ocr_service.ready.connect(self._on_ocr_ready, Qt.ConnectionType.QueuedConnection)
@@ -378,6 +465,8 @@ class MainWindow(QMainWindow):
         try:
             self._ocr_busy = busy
             if busy:
+                # OCR 线程已开始处理，提交阶段不再算“待接收”
+                self._ocr_pending_job_id = None
                 self._progress.setRange(0, 0)  # 不确定进度条
                 self._progress.setVisible(True)
                 self._ocr_timeout_prompted = False
@@ -391,8 +480,27 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.exception("处理 OCR busy 回调失败：%s", str(e))
 
+    def _guard_ocr_submission(self, job_id: int) -> None:
+        """
+        兜底保护：
+        如果提交后一段时间仍未进入 busy 状态，说明任务可能未被 OCR 线程接收，
+        主动恢复按钮，避免界面一直停留在“正在识别...”。
+        """
+
+        if job_id != self._ocr_pending_job_id:
+            return
+        if self._ocr_busy:
+            return
+
+        self._ocr_pending_job_id = None
+        self._ocr_start_time_by_job.pop(job_id, None)
+        logger.warning("OCR job=%s 提交后未被接收，已自动恢复 UI 状态", job_id)
+        self.statusBar().showMessage("识别请求未被处理，请重试一次（已自动恢复）")
+        if self.btn_capture is not None:
+            self.btn_capture.setEnabled(self.cap is not None and self._ocr_ready)
+
     def _tick_ocr_watchdog(self) -> None:
-        """识别进行中：更新耗时，超时则提示是否重启 OCR 服务。"""
+        """识别进行中：更新耗时，超时自动重启 OCR 服务。"""
 
         if not self._ocr_busy:
             return
@@ -402,19 +510,30 @@ class MainWindow(QMainWindow):
         cost = time.monotonic() - start_t
         self.statusBar().showMessage(f"正在识别...（已用 {cost:.1f}s）")
 
-        # 超时保护：底层推理偶发卡住时，让用户可以自救
-        if cost >= 45 and not self._ocr_timeout_prompted:
+        # 超时保护：底层推理偶发卡住时，自动重启 OCR 服务并恢复可用状态
+        timeout_sec = 25
+        try:
+            timeout_sec = max(
+                8, int(os.environ.get("POST_OCR_JOB_TIMEOUT_SEC", "25").strip() or "25")
+            )
+        except Exception:
+            timeout_sec = 25
+        if cost >= timeout_sec and not self._ocr_timeout_prompted:
             self._ocr_timeout_prompted = True
-            reply = QMessageBox.question(
+            logger.warning("OCR job=%s 超时 %.1fs，自动重启 OCR 服务", self._ocr_job_id, cost)
+            self.statusBar().showMessage(f"识别超时（{cost:.1f}s），正在自动恢复...")
+            # 当前任务视为失败并回收，避免界面一直等待结果
+            self._ocr_start_time_by_job.pop(self._ocr_job_id, None)
+            self._restart_ocr_service()
+            QMessageBox.warning(
                 self,
                 "识别超时",
-                "识别已超过 45 秒仍未完成，可能卡住。\n\n是否重启 OCR 服务？\n（若仍无响应，建议直接退出并重新打开应用）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                "本次识别超时，已自动重启 OCR 服务。\n请再次拍照识别。",
             )
-            if reply == QMessageBox.StandardButton.Yes:
-                self._restart_ocr_service()
 
     def _on_ocr_finished_job(self, job_id: int, record: dict, texts: list) -> None:
+        if self._ocr_pending_job_id == job_id:
+            self._ocr_pending_job_id = None
         start_t = self._ocr_start_time_by_job.pop(job_id, None)
 
         # 只处理最新一次请求，避免旧结果回写
@@ -428,14 +547,18 @@ class MainWindow(QMainWindow):
             cost = f"（耗时 {time.monotonic() - start_t:.1f}s）"
         self.statusBar().showMessage(f"识别完成: {record.get('联系人/单位名', '未知')}{cost}")
         logger.info("OCR job=%s UI 回写完成 %s", job_id, cost)
+        self.btn_capture.setEnabled(self.cap is not None and self._ocr_ready and not self._ocr_busy)
 
     def _on_ocr_error_job(self, job_id: int, error: str) -> None:
+        if self._ocr_pending_job_id == job_id:
+            self._ocr_pending_job_id = None
         self._ocr_start_time_by_job.pop(job_id, None)
         if job_id != self._ocr_job_id:
             return
         self.statusBar().showMessage("识别失败")
         QMessageBox.warning(self, "识别失败", error)
         logger.error("OCR job=%s error: %s", job_id, error)
+        self.btn_capture.setEnabled(self.cap is not None and self._ocr_ready and not self._ocr_busy)
 
     def init_ui(self):
         central = QWidget()
@@ -519,6 +642,7 @@ class MainWindow(QMainWindow):
         # macOS/Qt 下 Space 经常被控件吞掉（按钮激活/表格选择等），用 ApplicationShortcut 更稳
         self._shortcut_capture2 = QShortcut(QKeySequence("Space"), self)
         self._shortcut_capture2.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._shortcut_capture2.setAutoRepeat(False)
         self._shortcut_capture2.activated.connect(self.capture_and_recognize)
 
     def load_cameras(self):
@@ -770,6 +894,13 @@ class MainWindow(QMainWindow):
         ret, frame = self.cap.read()
         if ret and frame is not None and frame.size > 0:
             self._frame_fail_count = 0
+            # 缓存原始帧，拍照时直接使用，避免按空格再读摄像头导致主线程阻塞
+            try:
+                self._last_frame = frame.copy()
+                self._last_frame_ts = time.monotonic()
+            except Exception:
+                self._last_frame = frame
+                self._last_frame_ts = time.monotonic()
             # 绘制扫描框
             h, w = frame.shape[:2]
             # 框的位置：上方 70%，编号在下方
@@ -812,6 +943,9 @@ class MainWindow(QMainWindow):
 
     def capture_and_recognize(self):
         """拍照并识别"""
+        if self._capture_in_progress:
+            self.statusBar().showMessage("正在拍照，请稍候")
+            return
         if self.cap is None:
             self.statusBar().showMessage("请先连接摄像头")
             return
@@ -822,61 +956,126 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("正在识别中，请稍后再按空格")
             return
 
-        ret, frame = self.cap.read()
-        if not ret:
-            self.statusBar().showMessage("拍照失败")
-            return
-
-        # 裁剪两块 ROI（主信息框 + 编号区域），显著减小像素量，提升速度与稳定性
-        h, w = frame.shape[:2]
-        x1, y1 = int(w * 0.06), int(h * 0.08)
-        x2 = int(w * 0.94)
-        y2_box = int(h * 0.78)
-
-        roi_images = []
+        self._capture_in_progress = True
         try:
-            roi_box = frame[y1:y2_box, x1:x2]
-            if roi_box is not None and roi_box.size > 0:
-                roi_images.append(roi_box)
-        except Exception:
-            pass
+            # 直接使用预览缓存帧，避免在按键回调中阻塞式 read 摄像头导致卡顿
+            frame = None
+            now = time.monotonic()
+            if self._last_frame is not None and (now - self._last_frame_ts) <= 1.5:
+                try:
+                    frame = self._last_frame.copy()
+                except Exception:
+                    frame = self._last_frame
 
-        try:
-            # 编号一般在底部中间，取较小区域即可
-            nx1, nx2 = int(w * 0.30), int(w * 0.70)
-            ny1, ny2 = int(h * 0.80), int(h * 0.98)
-            roi_num = frame[ny1:ny2, nx1:nx2]
-            if roi_num is not None and roi_num.size > 0:
-                roi_images.append(roi_num)
-        except Exception:
-            pass
+            if frame is None:
+                self.statusBar().showMessage("尚未拿到稳定画面，请稍后再按空格")
+                return
 
-        if not roi_images:
-            self.statusBar().showMessage("拍照失败：未截取到有效区域")
-            return
+            # 裁剪主信息 ROI 与编号 ROI
+            h, w = frame.shape[:2]
+            x1, y1 = int(w * 0.06), int(h * 0.08)
+            x2 = int(w * 0.94)
+            y2_box = int(h * 0.78)
 
-        # 超大分辨率下适当缩放（提高稳定性与速度）
-        resized_images = []
-        for img in roi_images:
+            roi_inputs = []
             try:
-                max_w = 1400
-                if img.shape[1] > max_w:
-                    scale = max_w / img.shape[1]
-                    img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
+                roi_box = frame[y1:y2_box, x1:x2]
+                if roi_box is not None and roi_box.size > 0:
+                    # 主信息区域切成多段，规避大图整块检测偶发卡住
+                    split_count = 2
+                    try:
+                        split_count = max(
+                            1,
+                            int(
+                                os.environ.get("POST_OCR_MAIN_SPLIT", "2").strip()
+                                or "2"
+                            ),
+                        )
+                    except Exception:
+                        split_count = 2
+                    split_count = min(split_count, 4)
+
+                    if split_count <= 1 or roi_box.shape[0] < 120:
+                        roi_inputs.append({"img": roi_box, "source": "main"})
+                    else:
+                        h_box = roi_box.shape[0]
+                        step = h_box / float(split_count)
+                        overlap = max(8, int(h_box * 0.06))
+                        for i in range(split_count):
+                            sy = int(max(0, i * step - (overlap if i > 0 else 0)))
+                            ey = int(
+                                min(
+                                    h_box,
+                                    (i + 1) * step
+                                    + (overlap if i < split_count - 1 else 0),
+                                )
+                            )
+                            part = roi_box[sy:ey, :]
+                            if part is not None and part.size > 0:
+                                roi_inputs.append({"img": part, "source": "main"})
             except Exception:
                 pass
-            resized_images.append(img)
 
-        logger.info("UI 触发识别：frame=%s, rois=%s", getattr(frame, "shape", None), [getattr(i, "shape", None) for i in resized_images])
+            try:
+                # 编号一般在底部中间，取较小区域即可
+                nx1, nx2 = int(w * 0.30), int(w * 0.70)
+                ny1, ny2 = int(h * 0.80), int(h * 0.98)
+                roi_num = frame[ny1:ny2, nx1:nx2]
+                if roi_num is not None and roi_num.size > 0:
+                    roi_inputs.append({"img": roi_num, "source": "number"})
+            except Exception:
+                pass
 
-        self.statusBar().showMessage("正在识别...")
-        self.btn_capture.setEnabled(False)
+            if not roi_inputs:
+                self.statusBar().showMessage("拍照失败：未截取到有效区域")
+                return
 
-        # 派发到 OCR 工作线程
-        self._ocr_job_id += 1
-        job_id = self._ocr_job_id
-        self._ocr_start_time_by_job[job_id] = time.monotonic()
-        self.request_ocr.emit(job_id, resized_images)
+            # 超大分辨率下适当缩放（提高稳定性与速度）
+            resized_inputs = []
+            max_w = 960
+            try:
+                max_w = max(
+                    600, int(os.environ.get("POST_OCR_MAX_ROI_WIDTH", "960").strip() or "960")
+                )
+            except Exception:
+                max_w = 960
+
+            for item in roi_inputs:
+                img = item.get("img")
+                source = item.get("source", "main")
+                try:
+                    if img is not None and img.shape[1] > max_w:
+                        scale = max_w / img.shape[1]
+                        img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
+                except Exception:
+                    pass
+                resized_inputs.append({"img": img, "source": source})
+
+            logger.info(
+                "UI 触发识别：frame=%s, rois=%s, frame_age=%.3fs",
+                getattr(frame, "shape", None),
+                [
+                    {
+                        "source": item.get("source", "main"),
+                        "shape": getattr(item.get("img"), "shape", None),
+                    }
+                    for item in resized_inputs
+                ],
+                max(0.0, now - self._last_frame_ts),
+            )
+
+            self.statusBar().showMessage("正在识别...")
+            self.btn_capture.setEnabled(False)
+
+            # 派发到 OCR 工作线程
+            self._ocr_job_id += 1
+            job_id = self._ocr_job_id
+            self._ocr_pending_job_id = job_id
+            self._ocr_start_time_by_job[job_id] = time.monotonic()
+            self.request_ocr.emit(job_id, resized_inputs)
+            QTimer.singleShot(2000, lambda j=job_id: self._guard_ocr_submission(j))
+        finally:
+            self._capture_in_progress = False
 
     def update_table(self):
         """更新表格"""
