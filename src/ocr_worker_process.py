@@ -48,9 +48,11 @@ def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
             for roi_index, entry in enumerate(images):
                 source = "main"
                 img = entry
+                y_offset = 0
                 if isinstance(entry, dict):
                     source = str(entry.get("source", "main"))
                     img = entry.get("img")
+                    y_offset = int(entry.get("y_offset", 0))
                 elif roi_index > 0:
                     source = "number"
                 if img is None:
@@ -68,10 +70,14 @@ def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
                                 conf = float(line[1][1])
                             except Exception:
                                 conf = None
+                            # 将切片内的局部坐标还原为完整 ROI 坐标
+                            box = line[0]
+                            if y_offset and isinstance(box, (list, tuple)):
+                                box = [[p[0], p[1] + y_offset] for p in box]
                             ocr_lines.append(
                                 {
                                     "text": text,
-                                    "box": line[0],
+                                    "box": box,
                                     "conf": conf,
                                     "source": source,
                                     "roi_index": roi_index,

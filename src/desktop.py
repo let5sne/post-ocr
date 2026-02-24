@@ -540,6 +540,9 @@ class MainWindow(QMainWindow):
         if job_id != self._ocr_job_id:
             return
 
+        logger.info("OCR job=%s 原始文本: %s", job_id, texts)
+        logger.info("OCR job=%s 解析结果: %s", job_id, record)
+
         self.records.append(record)
         self.update_table()
         cost = ""
@@ -996,7 +999,7 @@ class MainWindow(QMainWindow):
                     split_count = min(split_count, 4)
 
                     if split_count <= 1 or roi_box.shape[0] < 120:
-                        roi_inputs.append({"img": roi_box, "source": "main"})
+                        roi_inputs.append({"img": roi_box, "source": "main", "y_offset": 0})
                     else:
                         h_box = roi_box.shape[0]
                         step = h_box / float(split_count)
@@ -1012,7 +1015,7 @@ class MainWindow(QMainWindow):
                             )
                             part = roi_box[sy:ey, :]
                             if part is not None and part.size > 0:
-                                roi_inputs.append({"img": part, "source": "main"})
+                                roi_inputs.append({"img": part, "source": "main", "y_offset": sy})
             except Exception:
                 pass
 
@@ -1043,13 +1046,15 @@ class MainWindow(QMainWindow):
             for item in roi_inputs:
                 img = item.get("img")
                 source = item.get("source", "main")
+                y_off = item.get("y_offset", 0)
+                scale = 1.0
                 try:
                     if img is not None and img.shape[1] > max_w:
                         scale = max_w / img.shape[1]
                         img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)))
                 except Exception:
                     pass
-                resized_inputs.append({"img": img, "source": source})
+                resized_inputs.append({"img": img, "source": source, "y_offset": int(y_off * scale)})
 
             logger.info(
                 "UI 触发识别：frame=%s, rois=%s, frame_age=%.3fs",

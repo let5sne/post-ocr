@@ -11,6 +11,10 @@ ZIP_PATTERN = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 PHONE_PATTERN = re.compile(r"(?<!\d)(1[3-9]\d{9}|0\d{2,3}-?\d{7,8})(?!\d)")
 LONG_NUMBER_PATTERN = re.compile(r"(?<!\d)(\d{10,20})(?!\d)")
 ADDRESS_HINT_PATTERN = re.compile(r"(省|市|区|县|乡|镇|街|路|村|号|栋|单元|室)")
+COMPANY_HINT_PATTERN = re.compile(
+    r"(公司|有限|集团|工厂|物流|商贸|商行|超市|药房|药店|诊所|医院|学校|幼儿园"
+    r"|办公室|办事处|服务部|经营部|工作室|研究所|事务所|中心|银行|信用社|合作社)"
+)
 
 
 @dataclass
@@ -247,6 +251,15 @@ def _extract_tracking_number(lines: List[OCRLine], zip_code: str, phone: str) ->
 
 
 def _extract_with_layout(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[str, str, bool]:
+    """基于邮编/电话锚点的版面提取。
+
+    两种模式自动切换：
+    - 单栏模式（信封典型排版）：邮编后连续行=地址，电话行去掉电话=联系人
+    - 多栏模式：左侧=地址，右侧=联系人（按 split_x 分割）
+
+    单栏/多栏判断：比较邮编和电话的左边缘（x1），而非中心点（cx），
+    避免因文本长度不同导致误判。
+    """
     main_lines = [line for line in lines if line.source != "number"]
     if len(main_lines) < 2:
         return "", "", False
@@ -262,6 +275,9 @@ def _extract_with_layout(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[st
     if phone_anchor and not data["电话"]:
         data["电话"] = phone_anchor[1]
 
+    if not zip_anchor and not phone_anchor:
+        return "", "", False
+
     if zip_anchor:
         start_row = zip_anchor[0].row_idx
     else:
@@ -273,13 +289,62 @@ def _extract_with_layout(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[st
     if start_row > end_row:
         start_row, end_row = end_row, start_row
 
+    # ── 单栏/多栏判断：用左边缘 x1 而非中心点 cx ──
     single_column_mode = False
     if zip_anchor and phone_anchor:
+        zip_x1 = zip_anchor[0].x1 if zip_anchor[0].x1 is not None else zip_anchor[0].cx
+        phone_x1 = phone_anchor[0].x1 if phone_anchor[0].x1 is not None else phone_anchor[0].cx
         line_widths = [line.width for line in main_lines if line.width > 0]
         width_ref = median(line_widths) if line_widths else 120.0
-        single_column_mode = abs(phone_anchor[0].cx - zip_anchor[0].cx) < max(60.0, width_ref * 0.6)
+        single_column_mode = abs(phone_x1 - zip_x1) < max(60.0, width_ref * 0.4)
 
-    if zip_anchor and phone_anchor and phone_anchor[0].cx > zip_anchor[0].cx and not single_column_mode:
+    # ════════════════════════════════════════════
+    # 单栏模式：邮编后连续行=地址，电话行去掉电话=联系人
+    # ════════════════════════════════════════════
+    if single_column_mode:
+        # 从电话行提取联系人
+        contact_text = ""
+        if phone_anchor:
+            remainder = clean_text(phone_anchor[0].text.replace(phone_anchor[1], ""))
+            if remainder and not re.fullmatch(r"\d{2,20}", remainder):
+                contact_text = _sanitize_contact(remainder)
+
+        # 邮编行之后、电话行之前的所有行 → 地址
+        address_entries: List[Tuple[int, int, str]] = []
+        for line in main_lines:
+            if line.row_idx < start_row or line.row_idx > end_row:
+                continue
+            if phone_anchor and line is phone_anchor[0]:
+                continue
+            text = line.text
+            if zip_anchor and line is zip_anchor[0]:
+                text = text.replace(zip_anchor[1], "")
+            text = clean_text(text)
+            if not text or re.fullmatch(r"\d{6,20}", text):
+                continue
+            address_entries.append((line.row_idx, line.col_idx, text))
+
+        # 联系人为空时，从地址末尾回退一行
+        if not contact_text and address_entries:
+            last_row = max(item[0] for item in address_entries)
+            last_entries = [item for item in address_entries if item[0] == last_row]
+            last_text = _join_entries(last_entries)
+            candidate = _sanitize_contact(last_text)
+            if candidate:
+                prev_rows = [item[0] for item in address_entries if item[0] < last_row]
+                # 与前面地址行有行间距 > 1，或含单位关键字 → 视为联系人
+                gap = (last_row - max(prev_rows)) if prev_rows else 999
+                if gap > 1 or COMPANY_HINT_PATTERN.search(last_text):
+                    contact_text = candidate
+                    address_entries = [item for item in address_entries if item[0] != last_row]
+
+        address_text = _sanitize_address(_join_entries(address_entries))
+        return address_text, contact_text, True
+
+    # ════════════════════════════════════════════
+    # 多栏模式：按 split_x 左右分割
+    # ════════════════════════════════════════════
+    if zip_anchor and phone_anchor and phone_anchor[0].cx > zip_anchor[0].cx:
         split_x = (zip_anchor[0].cx + phone_anchor[0].cx) / 2.0
     elif phone_anchor:
         split_x = phone_anchor[0].cx - max(40.0, phone_anchor[0].width * 0.6)
@@ -288,29 +353,19 @@ def _extract_with_layout(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[st
     else:
         split_x = median([line.cx for line in main_lines])
 
-    address_entries: List[Tuple[int, int, str]] = []
+    address_entries = []
     contact_entries: List[Tuple[int, int, str]] = []
 
     for line in main_lines:
         if line.row_idx < start_row or line.row_idx > end_row:
             continue
-
         text = line.text
         if zip_anchor and line is zip_anchor[0]:
             text = text.replace(zip_anchor[1], "")
         if phone_anchor and line is phone_anchor[0]:
             text = text.replace(phone_anchor[1], "")
         text = clean_text(text)
-        if not text:
-            continue
-        if re.fullmatch(r"\d{6,20}", text):
-            continue
-
-        if single_column_mode:
-            if phone_anchor and line is phone_anchor[0]:
-                contact_entries.append((line.row_idx, line.col_idx, text))
-            else:
-                address_entries.append((line.row_idx, line.col_idx, text))
+        if not text or re.fullmatch(r"\d{6,20}", text):
             continue
 
         if line.cx <= split_x:
@@ -318,7 +373,7 @@ def _extract_with_layout(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[st
         else:
             contact_entries.append((line.row_idx, line.col_idx, text))
 
-    # 联系人优先取靠近电话的一段，降低把地址误分到联系人的概率
+    # 联系人优先取靠近电话的一段
     if phone_anchor and contact_entries:
         phone_row = phone_anchor[0].row_idx
         min_dist = min(abs(item[0] - phone_row) for item in contact_entries)
@@ -329,34 +384,13 @@ def _extract_with_layout(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[st
     contact_text = _sanitize_contact(_join_entries(contact_entries))
     address_text = _sanitize_address(_join_entries(address_entries))
 
-    # 如果联系人仍为空，尝试从“电话所在行去掉电话号码”的残余文本提取
+    # 多栏模式下联系人为空的回退
     if not contact_text and phone_anchor:
-        fallback_contact = clean_text(phone_anchor[0].text.replace(phone_anchor[1], ""))
-        if fallback_contact and not re.fullmatch(r"\d{2,20}", fallback_contact):
-            contact_text = _sanitize_contact(fallback_contact)
+        remainder = clean_text(phone_anchor[0].text.replace(phone_anchor[1], ""))
+        if remainder and not re.fullmatch(r"\d{2,20}", remainder):
+            contact_text = _sanitize_contact(remainder)
 
-    # 若仍缺联系人，尝试从靠近电话的地址候选中回退一行
-    if not contact_text and phone_anchor and address_entries:
-        phone_row = phone_anchor[0].row_idx
-        sorted_candidates = sorted(
-            address_entries,
-            key=lambda item: (abs(item[0] - phone_row), -item[0], item[1]),
-        )
-        for row_idx, col_idx, txt in sorted_candidates:
-            if ADDRESS_HINT_PATTERN.search(txt):
-                continue
-            contact_text = _sanitize_contact(txt)
-            if contact_text:
-                address_entries = [
-                    item
-                    for item in address_entries
-                    if not (item[0] == row_idx and item[1] == col_idx and item[2] == txt)
-                ]
-                address_text = _sanitize_address(_join_entries(address_entries))
-                break
-
-    has_signal = bool(zip_anchor or phone_anchor)
-    return address_text, contact_text, has_signal
+    return address_text, contact_text, True
 
 
 def _extract_with_text_order(lines: List[OCRLine], data: Dict[str, str]) -> Tuple[str, str, bool]:
@@ -407,12 +441,21 @@ def _extract_with_text_order(lines: List[OCRLine], data: Dict[str, str]) -> Tupl
 
     if not contact_text and address_parts:
         for idx, text in reversed(address_parts):
-            if ADDRESS_HINT_PATTERN.search(text):
+            # 含单位关键字的直接采纳；纯地址行跳过
+            if ADDRESS_HINT_PATTERN.search(text) and not COMPANY_HINT_PATTERN.search(text):
                 continue
             contact_text = _sanitize_contact(text)
             if contact_text:
                 address_parts = [item for item in address_parts if item[0] != idx]
                 break
+
+    # 兜底：电话紧邻上一行即使含地址关键字也采纳（如"蒲江县宏利物流有限公司"）
+    if not contact_text and address_parts:
+        last_idx, last_text = address_parts[-1]
+        if last_idx == phone_idx - 1:
+            contact_text = _sanitize_contact(last_text)
+            if contact_text:
+                address_parts = address_parts[:-1]
 
     address_text = _sanitize_address("".join(text for _, text in address_parts))
     return address_text, contact_text, True
@@ -436,7 +479,7 @@ def extract_info(ocr_results: List[Any]) -> Dict[str, str]:
     data["电话"] = _first_match(PHONE_PATTERN, full_content)
     data["编号"] = _extract_tracking_number(lines, data["邮编"], data["电话"])
 
-    # 第一优先级：使用版面坐标进行“邮编-电话锚点 + 连续块”解析
+    # 第一优先级：使用版面坐标进行"邮编-电话锚点 + 连续块"解析
     address_text, contact_text, used_layout = _extract_with_layout(lines, data)
     if not used_layout:
         # 第二优先级：无坐标时按文本顺序回退

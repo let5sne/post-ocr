@@ -80,10 +80,81 @@ def case_text_fallback() -> None:
     assert "华南建设小组办公室" in result["联系人/单位名"] or result["联系人/单位名"] == "王五"
 
 
+def case_company_contact_with_phone() -> None:
+    """单位名含地址关键字 + 电话同行，地址跨两行。"""
+    ocr_lines = [
+        {"text": "610000", "box": [[80, 40], [180, 40], [180, 80], [80, 80]], "source": "main"},
+        {"text": "四川省成都市蒲江县鹤山街道", "box": [[80, 100], [520, 100], [520, 132], [80, 132]], "source": "main"},
+        {"text": "健民路246号2栋1楼3号", "box": [[80, 140], [460, 140], [460, 172], [80, 172]], "source": "main"},
+        {"text": "蒲江县宏利物流有限公司 15600000000", "box": [[80, 180], [560, 180], [560, 212], [80, 212]], "source": "main"},
+        {"text": "20260200425708", "box": [[280, 60], [760, 60], [760, 94], [280, 94]], "source": "number"},
+    ]
+    result = extract_info(ocr_lines)
+    _print_case("单位名+电话同行（带坐标）", result)
+
+    assert result["邮编"] == "610000"
+    assert result["电话"] == "15600000000"
+    assert "四川省成都市蒲江县鹤山街道" in result["地址"]
+    assert "健民路246号2栋1楼3号" in result["地址"]
+    assert "蒲江县宏利物流有限公司" not in result["地址"], f"单位名不应混入地址: {result['地址']}"
+    assert "宏利物流" in result["联系人/单位名"], f"联系人应含单位名: {result['联系人/单位名']}"
+    assert result["编号"] == "20260200425708"
+
+
+def case_company_contact_separate_line() -> None:
+    """单位名和电话分两行（无坐标回退）。"""
+    ocr_texts = [
+        "610000",
+        "四川省成都市蒲江县鹤山街道",
+        "健民路246号2栋1楼3号",
+        "蒲江县宏利物流有限公司",
+        "15600000000",
+    ]
+    result = extract_info(ocr_texts)
+    _print_case("单位名+电话分行（纯文本）", result)
+
+    assert result["邮编"] == "610000"
+    assert result["电话"] == "15600000000"
+    assert "四川省成都市蒲江县鹤山街道" in result["地址"]
+    assert "健民路246号2栋1楼3号" in result["地址"]
+    assert "宏利物流" in result["联系人/单位名"], f"联系人应含单位名: {result['联系人/单位名']}"
+
+
+def case_split_roi_address() -> None:
+    """模拟 ROI 切片后坐标已偏移还原的场景：地址跨两个切片。
+
+    切片1 (y_offset=0): 邮编 + 地址第一行
+    切片2 (y_offset=200): 地址第二行 + 联系人+电话
+    坐标已在 worker 中加上 y_offset，此处直接传最终坐标。
+    """
+    ocr_lines = [
+        # 切片1 的结果（y_offset=0，坐标不变）
+        {"text": "610000", "box": [[80, 30], [180, 30], [180, 60], [80, 60]], "source": "main"},
+        {"text": "四川省成都市蒲江县鹤山街道健民路246号2栋1", "box": [[80, 80], [560, 80], [560, 112], [80, 112]], "source": "main"},
+        # 切片2 的结果（原始 y 约 10~42，加上 y_offset=200 后变成 210~242）
+        {"text": "楼3号", "box": [[80, 210], [160, 210], [160, 242], [80, 242]], "source": "main"},
+        {"text": "蒲江县宏利物流有限公司 15600000000", "box": [[80, 260], [560, 260], [560, 292], [80, 292]], "source": "main"},
+        # 编号区域
+        {"text": "20260200425708", "box": [[280, 400], [760, 400], [760, 434], [280, 434]], "source": "number"},
+    ]
+    result = extract_info(ocr_lines)
+    _print_case("ROI切片坐标还原", result)
+
+    assert result["邮编"] == "610000"
+    assert result["电话"] == "15600000000"
+    # 关键：地址两行应正确拼接
+    assert "健民路246号2栋1" in result["地址"], f"地址应含第一行: {result['地址']}"
+    assert "楼3号" in result["地址"], f"地址应含第二行: {result['地址']}"
+    assert "宏利物流" in result["联系人/单位名"], f"联系人应含单位名: {result['联系人/单位名']}"
+
+
 def main() -> None:
     case_layout_multi_column()
     case_layout_single_column()
     case_text_fallback()
+    case_company_contact_with_phone()
+    case_company_contact_separate_line()
+    case_split_roi_address()
     print("\n所有场景断言通过。")
 
 
