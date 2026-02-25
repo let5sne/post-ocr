@@ -43,6 +43,8 @@ jobs:
         run: pip install -r requirements-build.txt
 
       - name: 执行打包
+        env:
+          PYTHONIOENCODING: utf-8
         run: python ${{ matrix.script }}
 
       - name: 压缩产物（Windows）
