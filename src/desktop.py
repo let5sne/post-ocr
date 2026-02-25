@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QStatusBar, QProgressBar
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, pyqtSlot
-from PyQt6.QtGui import QImage, QPixmap, QFont, QAction, QKeySequence, QShortcut
+from PyQt6.QtGui import QImage, QPixmap, QFont, QAction, QKeySequence, QShortcut, QColor, QBrush
 
 from ocr_offline import get_models_base_dir
 from ocr_worker_process import run_ocr_worker
@@ -923,9 +923,9 @@ class MainWindow(QMainWindow):
                 self._last_frame_ts = time.monotonic()
             # 绘制扫描框
             h, w = frame.shape[:2]
-            # 框的位置：上方 70%，编号在下方
-            x1, y1 = int(w * 0.06), int(h * 0.08)
-            x2, y2 = int(w * 0.94), int(h * 0.78)
+            # 主内容区：邮编+地址+联系人+电话，占上方 85%
+            x1, y1 = int(w * 0.04), int(h * 0.04)
+            x2, y2 = int(w * 0.96), int(h * 0.85)
 
             # 绘制绿色边框
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -941,14 +941,11 @@ class MainWindow(QMainWindow):
             cv2.line(frame, (x2, y2), (x2 - corner_len, y2), (0, 255, 0), 4)
             cv2.line(frame, (x2, y2), (x2, y2 - corner_len), (0, 255, 0), 4)
 
-            # 提示文字
-            cv2.putText(frame, "You Bian", (x1 + 10, y1 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(frame, "Di Zhi", (x1 + 10, y1 + int((y2-y1)*0.4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(frame, "Lian Xi Ren", (x1 + 10, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(frame, "Dian Hua", (x2 - 80, y2 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-            # 编号提示
-            cv2.putText(frame, "^ Bian Hao ^", (int(w*0.4), int(h*0.88)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # 编号区域提示（主内容区下方偏左）
+            nx1, ny1 = int(w * 0.04), int(h * 0.87)
+            nx2, ny2 = int(w * 0.50), int(h * 0.97)
+            cv2.rectangle(frame, (nx1, ny1), (nx2, ny2), (0, 255, 0), 1)
+            cv2.putText(frame, "Bian Hao", (nx1 + 10, ny1 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
             # 转换为 Qt 图像
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -991,28 +988,28 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("尚未拿到稳定画面，请稍后再按空格")
                 return
 
-            # 裁剪主信息 ROI 与编号 ROI
+            # 裁剪主信息 ROI 与编号 ROI（与预览框一致）
             h, w = frame.shape[:2]
-            x1, y1 = int(w * 0.06), int(h * 0.08)
-            x2 = int(w * 0.94)
-            y2_box = int(h * 0.78)
+            x1, y1 = int(w * 0.04), int(h * 0.04)
+            x2 = int(w * 0.96)
+            y2_box = int(h * 0.85)
 
             roi_inputs = []
             try:
                 roi_box = frame[y1:y2_box, x1:x2]
                 if roi_box is not None and roi_box.size > 0:
                     # 主信息区域切成多段，规避大图整块检测偶发卡住
-                    split_count = 2
+                    split_count = 1
                     try:
                         split_count = max(
                             1,
                             int(
-                                os.environ.get("POST_OCR_MAIN_SPLIT", "2").strip()
-                                or "2"
+                                os.environ.get("POST_OCR_MAIN_SPLIT", "1").strip()
+                                or "1"
                             ),
                         )
                     except Exception:
-                        split_count = 2
+                        split_count = 1
                     split_count = min(split_count, 4)
 
                     if split_count <= 1 or roi_box.shape[0] < 120:
@@ -1037,9 +1034,9 @@ class MainWindow(QMainWindow):
                 pass
 
             try:
-                # 编号一般在底部中间，取较小区域即可
-                nx1, nx2 = int(w * 0.30), int(w * 0.70)
-                ny1, ny2 = int(h * 0.80), int(h * 0.98)
+                # 编号在主内容区下方偏左
+                nx1, nx2 = int(w * 0.04), int(w * 0.50)
+                ny1, ny2 = int(h * 0.87), int(h * 0.97)
                 roi_num = frame[ny1:ny2, nx1:nx2]
                 if roi_num is not None and roi_num.size > 0:
                     roi_inputs.append({"img": roi_num, "source": "number"})
@@ -1102,12 +1099,28 @@ class MainWindow(QMainWindow):
     def update_table(self):
         """更新表格"""
         self.table.setRowCount(len(self.records))
+        red_brush = QBrush(QColor(220, 40, 40))
+        red_bg = QColor(255, 230, 230)
+        default_brush = QBrush(QColor(0, 0, 0))
         for i, r in enumerate(self.records):
-            self.table.setItem(i, 0, QTableWidgetItem(r.get("编号", "")))
-            self.table.setItem(i, 1, QTableWidgetItem(r.get("邮编", "")))
-            self.table.setItem(i, 2, QTableWidgetItem(r.get("地址", "")))
-            self.table.setItem(i, 3, QTableWidgetItem(r.get("联系人/单位名", "")))
-            self.table.setItem(i, 4, QTableWidgetItem(r.get("电话", "")))
+            warnings = r.get("_warnings", [])
+            has_warning = bool(warnings)
+            tooltip = "\n".join(warnings) if has_warning else ""
+
+            for col, key in enumerate(["编号", "邮编", "地址", "联系人/单位名", "电话"]):
+                value = r.get(key, "")
+                item = QTableWidgetItem(value)
+                # 整行有警告 或 当前字段为空 → 标红
+                if has_warning or not value.strip():
+                    item.setForeground(red_brush)
+                    if not value.strip():
+                        item.setBackground(red_bg)
+                        item.setToolTip(f"⚠ {key}为空")
+                    elif tooltip:
+                        item.setToolTip(tooltip)
+                else:
+                    item.setForeground(default_brush)
+                self.table.setItem(i, col, item)
 
         self.right_panel.setTitle(f"📋 已识别记录 ({len(self.records)})")
 
@@ -1127,7 +1140,7 @@ class MainWindow(QMainWindow):
                 self.update_table()
 
     def export_excel(self):
-        """导出 Excel"""
+        """导出 Excel，有警告的行标红"""
         if not self.records:
             QMessageBox.warning(self, "提示", "没有可导出的记录")
             return
@@ -1136,12 +1149,53 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "保存 Excel", default_name, "Excel Files (*.xlsx)")
 
         if path:
-            df = pd.DataFrame(self.records)
-            cols = ["编号", "邮编", "地址", "联系人/单位名", "电话"]
+            from openpyxl.styles import PatternFill, Font as XlFont
+
+            # 构建导出数据，增加"警告"列
+            export_rows = []
+            for r in self.records:
+                row = {k: r.get(k, "") for k in ["编号", "邮编", "地址", "联系人/单位名", "电话"]}
+                warnings = r.get("_warnings", [])
+                row["警告"] = "\n".join(warnings) if warnings else ""
+                export_rows.append(row)
+
+            df = pd.DataFrame(export_rows)
+            cols = ["编号", "邮编", "地址", "联系人/单位名", "电话", "警告"]
             df = df.reindex(columns=cols)
             df.to_excel(path, index=False)
+
+            # 用 openpyxl 对有警告的行标红
+            from openpyxl import load_workbook
+            wb = load_workbook(path)
+            ws = wb.active
+            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            red_font = XlFont(color="9C0006")
+            for row_idx in range(2, ws.max_row + 1):  # 跳过表头
+                warn_cell = ws.cell(row=row_idx, column=6)  # 警告列
+                has_warn = bool(warn_cell.value)
+                for col_idx in range(1, 6):  # 编号~电话（1~5列）
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    # 有警告的整行标红，或单个空字段标红
+                    if has_warn or not (cell.value and str(cell.value).strip()):
+                        cell.fill = red_fill
+                        cell.font = red_font
+                # 警告列本身也标红
+                if has_warn:
+                    warn_cell.fill = red_fill
+                    warn_cell.font = red_font
+            wb.save(path)
+
+            def _has_issue(r):
+                if r.get("_warnings"):
+                    return True
+                return any(not r.get(k, "").strip() for k in ["编号", "邮编", "地址", "联系人/单位名", "电话"])
+
+            warn_count = sum(1 for r in self.records if _has_issue(r))
+            msg = f"已导出 {len(self.records)} 条记录到：\n{path}"
+            if warn_count:
+                msg += f"\n\n❗ 其中 {warn_count} 条需人工复核（已标红）"
             self.statusBar().showMessage(f"已导出: {path}")
-            QMessageBox.information(self, "成功", f"已导出 {len(self.records)} 条记录到:\n{path}")
+            QMessageBox.information(self, "成功", msg)
 
     def closeEvent(self, event):
         """关闭窗口"""

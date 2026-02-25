@@ -78,6 +78,28 @@ class RapidOCREngine(BaseOCREngine):
         if dict_path:
             kwargs["rec_keys_path"] = dict_path
 
+        # RapidOCR 1.4.4 参数名规则：det_ 前缀 + Det 配置键名
+        # Det.box_thresh 默认 0.5，对信封上孤立单字（如"号"）检测不佳，
+        # 降低阈值提升小文本框召回率。
+        # Global.text_score 默认 0.5，过滤识别置信度低的结果，同步降低。
+        det_box_thresh_env = os.environ.get("POST_OCR_RAPID_DET_BOX_THRESH", "").strip()
+        det_box_thresh = 0.3
+        if det_box_thresh_env:
+            try:
+                det_box_thresh = float(det_box_thresh_env)
+            except ValueError:
+                pass
+        kwargs["det_box_thresh"] = det_box_thresh
+
+        text_score_env = os.environ.get("POST_OCR_RAPID_TEXT_SCORE", "").strip()
+        text_score = 0.3
+        if text_score_env:
+            try:
+                text_score = float(text_score_env)
+            except ValueError:
+                pass
+        kwargs["text_score"] = text_score
+
         self._ocr = RapidOCR(**kwargs)
         self._models_base_dir = models_base_dir
 

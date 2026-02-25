@@ -512,6 +512,16 @@ def extract_info(ocr_results: List[Any]) -> Dict[str, str]:
             hint_lines.sort(key=lambda txt: len(clean_text(txt)), reverse=True)
             data["地址"] = _sanitize_address(hint_lines[0])
 
+    # 质检：检测可疑地址，标记警告供人工复核
+    warnings: List[str] = []
+    if data["地址"] and re.search(r"(?:层|楼)\d{1,3}$", data["地址"]):
+        warnings.append('地址末尾可能缺少"号"字，请复核')
+    if not data["地址"]:
+        warnings.append("未提取到地址")
+    if not data["电话"]:
+        warnings.append("未提取到电话")
+    data["_warnings"] = warnings
+
     return data
 
 

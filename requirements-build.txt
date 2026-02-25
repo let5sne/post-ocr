@@ -1,0 +1,14 @@
+# 打包用最小依赖（纯 RapidOCR，不含 PaddleOCR）
+rapidocr-onnxruntime
+
+# 数据处理
+pandas
+openpyxl
+pydantic
+
+# 桌面 UI
+PyQt6
+opencv-python
+
+# 打包工具
+pyinstaller
