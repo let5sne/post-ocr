@@ -95,7 +95,7 @@ class OCRService(QObject):
         if sys.platform == "darwin":
             # macOS + PyQt/OpenCV 场景下 fork 对 ONNX 推理稳定性较差，rapidocr 默认走 spawn。
             # Paddle 在 macOS 历史上与 spawn 组合更容易出现卡住，因此保留 fork。
-            method_default = "fork" if backend_req == "paddle" else "spawn"
+            method_default = "spawn"
         else:
             method_default = "spawn"
         method = os.environ.get("POST_OCR_MP_START_METHOD", method_default).strip() or method_default
@@ -312,45 +312,6 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
         self.load_cameras()
-
-        # 历史上主线程直接 import paddleocr 偶发卡死。
-        # 默认跳过该步骤，避免 UI 被阻塞；如需诊断可打开轻量预检（子进程 + 超时）。
-        if os.environ.get("POST_OCR_PRECHECK_IMPORT", "0").strip() == "1":
-            timeout_sec = 8
-            try:
-                timeout_sec = max(
-                    2,
-                    int(
-                        os.environ.get("POST_OCR_PRECHECK_TIMEOUT_SEC", "8").strip()
-                        or "8"
-                    ),
-                )
-            except Exception:
-                timeout_sec = 8
-            self.statusBar().showMessage("正在预检 OCR 模块...")
-            QApplication.processEvents()
-            try:
-                logger.info("OCR 预检开始（子进程，timeout=%ss）", timeout_sec)
-                proc = subprocess.run(
-                    [sys.executable, "-c", "import paddleocr"],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_sec,
-                )
-                if proc.returncode == 0:
-                    logger.info("OCR 预检通过")
-                else:
-                    logger.warning(
-                        "OCR 预检失败（rc=%s）：%s",
-                        proc.returncode,
-                        (proc.stderr or "").strip(),
-                    )
-            except subprocess.TimeoutExpired:
-                logger.warning("OCR 预检超时（%ss），跳过预检继续启动。", timeout_sec)
-            except Exception as e:
-                logger.warning("OCR 预检异常：%s（忽略并继续）", str(e))
-        else:
-            logger.info("已跳过主线程 OCR 预检（POST_OCR_PRECHECK_IMPORT=0）")
 
         # OCR 服务放在 UI 初始化之后启动，避免 ready/busy 信号回调时 btn_capture 尚未创建
         self.statusBar().showMessage("正在启动 OCR 服务...")

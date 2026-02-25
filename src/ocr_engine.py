@@ -31,40 +31,13 @@ def _to_float(val: Any) -> Optional[float]:
         return None
 
 
-class PaddleOCREngine(BaseOCREngine):
-    backend_name = "paddle"
-
-    def __init__(self, models_base_dir: Path):
-        from ocr_offline import create_offline_ocr
-
-        self._ocr = create_offline_ocr(models_base_dir=models_base_dir)
-
-    def infer_lines(self, img: Any) -> List[OCRLine]:
-        result = self._ocr.ocr(img, cls=False)
-        lines: List[OCRLine] = []
-        if result and result[0]:
-            for line in result[0]:
-                if not line or len(line) < 2:
-                    continue
-                text = str(line[1][0]) if isinstance(line[1], (list, tuple)) and line[1] else ""
-                if not text:
-                    continue
-                conf = None
-                if isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
-                    conf = _to_float(line[1][1])
-                lines.append(OCRLine(text=text, box=line[0], conf=conf))
-        return lines
-
-
 class RapidOCREngine(BaseOCREngine):
     backend_name = "rapidocr"
 
     def __init__(self, models_base_dir: Path):
-        # 按官方包名导入：rapidocr-onnxruntime -> rapidocr_onnxruntime
         from rapidocr_onnxruntime import RapidOCR
 
         kwargs: dict[str, Any] = {}
-        # 可选：如果用户准备了本地 ONNX 模型，可通过环境变量覆盖路径
         det_path = os.environ.get("POST_OCR_RAPID_DET_MODEL", "").strip()
         cls_path = os.environ.get("POST_OCR_RAPID_CLS_MODEL", "").strip()
         rec_path = os.environ.get("POST_OCR_RAPID_REC_MODEL", "").strip()
@@ -78,10 +51,7 @@ class RapidOCREngine(BaseOCREngine):
         if dict_path:
             kwargs["rec_keys_path"] = dict_path
 
-        # RapidOCR 1.4.4 参数名规则：det_ 前缀 + Det 配置键名
-        # Det.box_thresh 默认 0.5，对信封上孤立单字（如"号"）检测不佳，
-        # 降低阈值提升小文本框召回率。
-        # Global.text_score 默认 0.5，过滤识别置信度低的结果，同步降低。
+        # Det.box_thresh default 0.5 misses small text on envelopes; lower to 0.3
         det_box_thresh_env = os.environ.get("POST_OCR_RAPID_DET_BOX_THRESH", "").strip()
         det_box_thresh = 0.3
         if det_box_thresh_env:
@@ -115,7 +85,7 @@ class RapidOCREngine(BaseOCREngine):
         if not isinstance(item, (list, tuple)):
             return None
 
-        # 常见格式1: [box, text, score]
+        # Format 1: [box, text, score]
         if len(item) >= 2 and isinstance(item[1], str):
             box = item[0]
             text = item[1].strip()
@@ -124,7 +94,7 @@ class RapidOCREngine(BaseOCREngine):
                 return OCRLine(text=text, box=box, conf=conf)
             return None
 
-        # 常见格式2（Paddle风格）: [box, (text, score)]
+        # Format 2 (Paddle-style): [box, (text, score)]
         if len(item) >= 2 and isinstance(item[1], (list, tuple)) and len(item[1]) >= 1:
             text = str(item[1][0]).strip()
             if not text:
@@ -135,7 +105,6 @@ class RapidOCREngine(BaseOCREngine):
         return None
 
     def infer_lines(self, img: Any) -> List[OCRLine]:
-        # RapidOCR 常见返回：(ocr_res, elapse)
         raw = self._ocr(img)
         result = raw[0] if isinstance(raw, tuple) and len(raw) >= 1 else raw
         if result is None:
@@ -143,7 +112,6 @@ class RapidOCREngine(BaseOCREngine):
 
         lines: List[OCRLine] = []
 
-        # 一些版本返回对象：boxes/txts/scores
         if hasattr(result, "boxes") and hasattr(result, "txts"):
             boxes = list(getattr(result, "boxes") or [])
             txts = list(getattr(result, "txts") or [])
@@ -166,74 +134,8 @@ class RapidOCREngine(BaseOCREngine):
 
 
 def create_ocr_engine(models_base_dir: Path) -> BaseOCREngine:
-    """
-    创建 OCR 引擎。
-
-    环境变量：
-    - POST_OCR_BACKEND: rapidocr | paddle | auto（默认 rapidocr）
-    - POST_OCR_BACKEND_FALLBACK_PADDLE: 1/0（不设置时按后端类型决定）
-    """
-    backend_env = os.environ.get("POST_OCR_BACKEND")
-    backend = (backend_env or "rapidocr").strip().lower() or "rapidocr"
-    fallback_env = os.environ.get("POST_OCR_BACKEND_FALLBACK_PADDLE")
-    if fallback_env is None or fallback_env.strip() == "":
-        # 规则：
-        # 1) auto 模式默认允许回退
-        # 2) 用户显式指定 rapidocr 时，默认不静默回退（避免“看似切到 rapidocr 实际仍是 paddle”）
-        # 3) 其他场景保持兼容，默认允许回退
-        if backend == "auto":
-            allow_fallback = True
-        elif backend == "rapidocr" and backend_env is not None:
-            allow_fallback = False
-        else:
-            allow_fallback = True
-    else:
-        allow_fallback = fallback_env.strip().lower() not in {"0", "false", "off", "no"}
-
-    logger.info(
-        "create_ocr_engine: request=%s explicit=%s fallback=%s python=%s",
-        backend,
-        backend_env is not None,
-        allow_fallback,
-        sys.executable,
-    )
-
-    if backend in {"rapidocr", "onnx"}:
-        try:
-            engine = RapidOCREngine(models_base_dir=models_base_dir)
-            logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
-            return engine
-        except Exception as e:
-            logger.exception("create_ocr_engine: rapidocr 初始化失败")
-            if allow_fallback:
-                logger.warning("create_ocr_engine: 已回退到 paddle")
-                engine = PaddleOCREngine(models_base_dir=models_base_dir)
-                logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
-                return engine
-            raise RuntimeError(
-                "POST_OCR_BACKEND=rapidocr 初始化失败，且未启用回退。"
-                "请先安装 rapidocr-onnxruntime，或设置 POST_OCR_BACKEND_FALLBACK_PADDLE=1。"
-            ) from e
-
-    if backend == "paddle":
-        engine = PaddleOCREngine(models_base_dir=models_base_dir)
-        logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
-        return engine
-
-    # auto: 优先 rapidocr，失败回退 paddle
-    if backend == "auto":
-        try:
-            engine = RapidOCREngine(models_base_dir=models_base_dir)
-            logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
-            return engine
-        except Exception:
-            logger.exception("create_ocr_engine: auto 模式 rapidocr 初始化失败，回退 paddle")
-            engine = PaddleOCREngine(models_base_dir=models_base_dir)
-            logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
-            return engine
-
-    # 未知值兜底
-    logger.warning("create_ocr_engine: 未知后端 '%s'，回退 paddle", backend)
-    engine = PaddleOCREngine(models_base_dir=models_base_dir)
+    """Create OCR engine (RapidOCR only)."""
+    logger.info("create_ocr_engine: initializing RapidOCR, python=%s", sys.executable)
+    engine = RapidOCREngine(models_base_dir=models_base_dir)
     logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
     return engine

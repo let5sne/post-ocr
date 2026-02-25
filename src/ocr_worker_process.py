@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-# 必须在所有 paddle/numpy import 之前设置，否则 macOS spawn 子进程推理会死锁
+# 限制线程数，避免 ONNX Runtime 子进程推理死锁
 import os
 import logging
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["PADDLE_DISABLE_SIGNAL_HANDLER"] = "1"
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 from pathlib import Path
 from typing import Any
@@ -22,9 +19,7 @@ logger = logging.getLogger("post_ocr.ocr_worker")
 
 def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
     """
-    OCR 子进程主循环：
-    - 在子进程内初始化 PaddleOCR，避免阻塞主 UI 进程
-    - 接收任务并返回结构化结果
+    OCR worker subprocess loop.
     """
     try:
         response_q.put({"type": "progress", "stage": "init_start"})

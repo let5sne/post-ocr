@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Windows 打包脚本（纯 RapidOCR）
-使用方法: python build_win.py [--debug]
+Windows packaging script (RapidOCR only).
+Usage: python build_win.py [--debug]
 
-产出: dist/信封信息提取系统/
-  ├── 信封信息提取系统.exe
-  └── _internal/          (运行时依赖，含 ONNX 模型)
+Output: dist/信封信息提取系统/
 """
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,11 +15,39 @@ PROJECT_ROOT = Path(__file__).parent
 DIST_NAME = "信封信息提取系统"
 
 
+def _find_package_dir(pkg_name: str) -> Path:
+    """Locate installed package directory via pip show."""
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "show", pkg_name.replace("_", "-")],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        # Try with underscores too
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", pkg_name],
+            capture_output=True, text=True,
+        )
+    if result.returncode != 0:
+        raise FileNotFoundError(f"Package not installed: {pkg_name}")
+    for line in result.stdout.splitlines():
+        if line.startswith("Location:"):
+            location = Path(line.split(":", 1)[1].strip())
+            pkg_dir = location / pkg_name
+            if pkg_dir.is_dir():
+                return pkg_dir
+    raise FileNotFoundError(f"Cannot locate package directory for {pkg_name}")
+
+
 def build(debug=False):
-    print("正在打包（Windows + RapidOCR），请稍候...")
-    print(f"工作目录: {PROJECT_ROOT}")
-    print(f"模式: {'调试（带控制台）' if debug else '正式（无控制台）'}")
+    print("Packaging (Windows + RapidOCR) ...")
+    print(f"Working dir: {PROJECT_ROOT}")
+    print(f"Mode: {'debug' if debug else 'release'}")
     print("-" * 50)
+
+    rapid_dir = _find_package_dir("rapidocr_onnxruntime")
+    onnx_dir = _find_package_dir("onnxruntime")
+    print(f"rapidocr_onnxruntime: {rapid_dir}")
+    print(f"onnxruntime: {onnx_dir}")
 
     cmd = [
         sys.executable,
@@ -29,16 +57,20 @@ def build(debug=False):
         "--noconfirm",
         "--clean",
         "--paths=src",
+        "--additional-hooks-dir=hooks",
+        "--runtime-hook=hooks/rthook_onnxruntime.py",
         # --- hidden imports ---
         "--hidden-import=cv2",
         "--hidden-import=PIL",
         "--hidden-import=processor",
-        "--hidden-import=ocr_offline",
         "--hidden-import=ocr_engine",
         "--hidden-import=ocr_worker_process",
-        # --- 收集 RapidOCR 全部数据（ONNX 模型、字典等） ---
-        "--collect-all=rapidocr_onnxruntime",
-        "--collect-all=onnxruntime",
+        "--hidden-import=rapidocr_onnxruntime",
+        # --- add packages directly from venv ---
+        f"--add-data={rapid_dir}{os.pathsep}rapidocr_onnxruntime",
+        f"--add-data={onnx_dir}{os.pathsep}onnxruntime",
+        f"--add-binary={onnx_dir / 'capi' / '*.dll'}{os.pathsep}onnxruntime/capi",
+        f"--add-binary={onnx_dir / 'capi' / '*.pyd'}{os.pathsep}onnxruntime/capi",
     ]
 
     if not debug:
@@ -51,25 +83,33 @@ def build(debug=False):
     try:
         subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT))
     except subprocess.CalledProcessError as e:
-        print(f"打包失败: {e}")
+        print(f"Build failed: {e}")
         sys.exit(1)
     except FileNotFoundError:
-        print("错误: 未找到 PyInstaller，请先安装: pip install pyinstaller")
+        print("PyInstaller not found. pip install pyinstaller")
         sys.exit(1)
 
     dist_dir = PROJECT_ROOT / "dist" / DIST_NAME
-    if (dist_dir / f"{DIST_NAME}.exe").exists():
-        folder_size = sum(
-            f.stat().st_size for f in dist_dir.rglob("*") if f.is_file()
-        ) / 1024 / 1024
-        print(f"\n打包完成！")
-        print(f"输出目录: {dist_dir}")
-        print(f"总大小: {folder_size:.1f} MB")
-        print(f"\n分发方式: 将 {dist_dir.name}/ 整个文件夹打成 zip 即可。")
-    else:
-        print("警告: 未找到输出文件")
+    if not (dist_dir / f"{DIST_NAME}.exe").exists():
+        print("Warning: output exe not found")
+        return
+
+    # Post-build: copy onnxruntime native DLLs to _internal/ root
+    # so they are on the default DLL search path for subprocesses
+    capi_dir = dist_dir / "_internal" / "onnxruntime" / "capi"
+    internal_dir = dist_dir / "_internal"
+    if capi_dir.is_dir():
+        for dll in capi_dir.glob("*.dll"):
+            dst = internal_dir / dll.name
+            if not dst.exists():
+                shutil.copy2(dll, dst)
+                print(f"  Copied {dll.name} -> _internal/")
+
+    size = sum(
+        f.stat().st_size for f in dist_dir.rglob("*") if f.is_file()
+    ) / 1024 / 1024
+    print(f"\nDone! Output: {dist_dir}  ({size:.1f} MB)")
 
 
 if __name__ == "__main__":
-    debug = "--debug" in sys.argv
-    build(debug=debug)
+    build(debug="--debug" in sys.argv)
