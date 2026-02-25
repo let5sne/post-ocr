@@ -89,15 +89,22 @@ class OCRService(QObject):
         super().__init__()
         self._models_base_dir = models_base_dir
         self._busy = False
+        self.backend_name = "unknown"
         self._stop_event = threading.Event()
-        method_default = "fork" if sys.platform == "darwin" else "spawn"
+        backend_req = os.environ.get("POST_OCR_BACKEND", "rapidocr").strip().lower() or "rapidocr"
+        if sys.platform == "darwin":
+            # macOS + PyQt/OpenCV 场景下 fork 对 ONNX 推理稳定性较差，rapidocr 默认走 spawn。
+            # Paddle 在 macOS 历史上与 spawn 组合更容易出现卡住，因此保留 fork。
+            method_default = "fork" if backend_req == "paddle" else "spawn"
+        else:
+            method_default = "spawn"
         method = os.environ.get("POST_OCR_MP_START_METHOD", method_default).strip() or method_default
         try:
             self._ctx = mp.get_context(method)
         except ValueError:
             method = method_default
             self._ctx = mp.get_context(method_default)
-        logger.info("OCR multiprocessing start_method=%s", method)
+        logger.info("OCR multiprocessing start_method=%s (backend_req=%s)", method, backend_req)
         self._req_q = None
         self._resp_q = None
         self._proc = None
@@ -189,7 +196,12 @@ class OCRService(QObject):
                 logger.info("OCR 子进程进度 job=%s stage=%s%s", job_id, stage, suffix)
                 continue
             if msg_type == "ready":
-                logger.info("OCR 子进程已就绪 pid=%s", getattr(self._proc, "pid", None))
+                self.backend_name = str(msg.get("backend", "unknown"))
+                logger.info(
+                    "OCR 子进程已就绪 pid=%s backend=%s",
+                    getattr(self._proc, "pid", None),
+                    self.backend_name,
+                )
                 self.ready.emit()
                 continue
             if msg_type == "init_error":
@@ -448,11 +460,16 @@ class MainWindow(QMainWindow):
     def _on_ocr_ready(self) -> None:
         try:
             self._ocr_ready = True
-            self.statusBar().showMessage("OCR 模型已加载（离线）")
+            backend = "unknown"
+            try:
+                backend = str(getattr(self._ocr_service, "backend_name", "unknown"))
+            except Exception:
+                backend = "unknown"
+            self.statusBar().showMessage(f"OCR 模型已加载（{backend}）")
             btn = getattr(self, "btn_capture", None)
             if btn is not None:
                 btn.setEnabled(self.cap is not None and not self._ocr_busy)
-            logger.info("OCR ready")
+            logger.info("OCR ready backend=%s", backend)
         except Exception as e:
             logger.exception("处理 OCR ready 回调失败：%s", str(e))
 

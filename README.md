@@ -28,6 +28,8 @@
 sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
 
 # 安装 Python 依赖
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -36,17 +38,41 @@ pip install -r requirements.txt
 **命令行批处理**
 ```bash
 # 将图片放入 data/input/ 目录
-python src/main.py
+.venv/bin/python src/main.py
 
 # 结果保存在 data/output/result.xlsx
 ```
 
 **桌面应用**
 ```bash
-python src/desktop.py
+.venv/bin/python src/desktop.py
 
 # 启动 PyQt6 窗口，可选择摄像头实时拍照识别
 ```
+
+### 3. OCR 后端切换（RapidOCR / PaddleOCR）
+
+默认后端为 **RapidOCR(ONNX)**，可通过环境变量切换：
+
+```bash
+# 默认：RapidOCR（推荐，跨平台更稳）
+POST_OCR_BACKEND=rapidocr .venv/bin/python src/desktop.py
+
+# 强制使用 PaddleOCR
+POST_OCR_BACKEND=paddle .venv/bin/python src/desktop.py
+
+# 自动：优先 RapidOCR，失败回退 PaddleOCR
+POST_OCR_BACKEND=auto .venv/bin/python src/desktop.py
+```
+
+常用相关环境变量：
+- `POST_OCR_BACKEND_FALLBACK_PADDLE=1|0`：是否允许回退到 Paddle（默认：
+  - `POST_OCR_BACKEND=auto` 时为 `1`
+  - 用户显式 `POST_OCR_BACKEND=rapidocr` 时为 `0`）
+- `POST_OCR_MP_START_METHOD=spawn|fork`：强制指定 OCR 子进程启动方式（macOS 默认：rapidocr 用 `spawn`，paddle 用 `fork`）
+- `POST_OCR_MAIN_SPLIT=1~4`：主 ROI 分片数（默认 2）
+- `POST_OCR_MAX_ROI_WIDTH=600+`：识别前缩放宽度上限（默认 960）
+- `POST_OCR_JOB_TIMEOUT_SEC`：单次识别超时秒数（默认 25）
 
 ---
 

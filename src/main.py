@@ -1,8 +1,10 @@
 import os
 import glob
+import cv2
 import pandas as pd
 from tqdm import tqdm
-from paddleocr import PaddleOCR
+from pathlib import Path
+from ocr_engine import create_ocr_engine
 from processor import extract_info, save_to_excel
 
 # 禁用联网检查，加快启动速度
@@ -10,8 +12,9 @@ os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 
 def main():
-    # 初始化 PaddleOCR
-    ocr = PaddleOCR(use_textline_orientation=True, lang="ch")
+    # 初始化 OCR 引擎（默认 rapidocr，可通过环境变量切换）
+    models_dir = Path("models")
+    ocr_engine = create_ocr_engine(models_base_dir=models_dir)
 
     input_dir = "data/input"
     output_dir = "data/output"
@@ -36,31 +39,31 @@ def main():
     for img_path in tqdm(image_paths):
         try:
             # 1. 执行 OCR 识别
-            result = ocr.ocr(img_path, cls=False)
+            img = cv2.imread(img_path)
+            if img is None:
+                errors.append(
+                    {"file": os.path.basename(img_path), "error": "图片读取失败"}
+                )
+                continue
+            lines = ocr_engine.infer_lines(img)
 
             # 2. 提取文字行
             ocr_texts = []
             ocr_lines = []
-            if result and result[0]:
-                for line in result[0]:
-                    # line 格式: [box, (text, confidence)]
-                    if line and len(line) >= 2:
-                        text = str(line[1][0])
-                        ocr_texts.append(text)
-                        conf = None
-                        try:
-                            conf = float(line[1][1])
-                        except Exception:
-                            conf = None
-                        ocr_lines.append(
-                            {
-                                "text": text,
-                                "box": line[0],
-                                "conf": conf,
-                                "source": "main",
-                                "roi_index": 0,
-                            }
-                        )
+            for line in lines:
+                text = str(line.text).strip()
+                if not text:
+                    continue
+                ocr_texts.append(text)
+                ocr_lines.append(
+                    {
+                        "text": text,
+                        "box": line.box,
+                        "conf": line.conf,
+                        "source": "main",
+                        "roi_index": 0,
+                    }
+                )
 
             # 3. 结构化解析
             if ocr_texts:

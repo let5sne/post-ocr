@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # 必须在所有 paddle/numpy import 之前设置，否则 macOS spawn 子进程推理会死锁
 import os
+import logging
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -13,8 +14,10 @@ os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 from pathlib import Path
 from typing import Any
 
-from ocr_offline import create_offline_ocr
+from ocr_engine import create_ocr_engine
 from processor import extract_info
+
+logger = logging.getLogger("post_ocr.ocr_worker")
 
 
 def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
@@ -25,9 +28,10 @@ def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
     """
     try:
         response_q.put({"type": "progress", "stage": "init_start"})
-        ocr = create_offline_ocr(models_base_dir=Path(models_base_dir))
-        response_q.put({"type": "ready"})
+        engine = create_ocr_engine(models_base_dir=Path(models_base_dir))
+        response_q.put({"type": "ready", "backend": getattr(engine, "backend_name", "unknown")})
     except Exception as e:
+        logger.exception("OCR 子进程初始化失败")
         response_q.put({"type": "init_error", "error": str(e)})
         return
 
@@ -58,31 +62,26 @@ def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
                 if img is None:
                     continue
                 response_q.put({"type": "progress", "job_id": int(job_id), "stage": f"roi_{roi_index}_start"})
-                result = ocr.ocr(img, cls=False)
+                lines = engine.infer_lines(img)
                 response_q.put({"type": "progress", "job_id": int(job_id), "stage": f"roi_{roi_index}_done"})
-                if result and result[0]:
-                    for line in result[0]:
-                        if line and len(line) >= 2:
-                            text = str(line[1][0])
-                            ocr_texts.append(text)
-                            conf = None
-                            try:
-                                conf = float(line[1][1])
-                            except Exception:
-                                conf = None
-                            # 将切片内的局部坐标还原为完整 ROI 坐标
-                            box = line[0]
-                            if y_offset and isinstance(box, (list, tuple)):
-                                box = [[p[0], p[1] + y_offset] for p in box]
-                            ocr_lines.append(
-                                {
-                                    "text": text,
-                                    "box": box,
-                                    "conf": conf,
-                                    "source": source,
-                                    "roi_index": roi_index,
-                                }
-                            )
+                for line in lines:
+                    text = str(line.text).strip()
+                    if not text:
+                        continue
+                    ocr_texts.append(text)
+                    # 将切片内的局部坐标还原为完整 ROI 坐标
+                    box = line.box
+                    if y_offset and isinstance(box, (list, tuple)):
+                        box = [[p[0], p[1] + y_offset] for p in box]
+                    ocr_lines.append(
+                        {
+                            "text": text,
+                            "box": box,
+                            "conf": line.conf,
+                            "source": source,
+                            "roi_index": roi_index,
+                        }
+                    )
 
             record = extract_info(ocr_lines if ocr_lines else ocr_texts)
             response_q.put({"type": "progress", "job_id": int(job_id), "stage": "parse_done", "texts": len(ocr_texts)})
@@ -95,4 +94,5 @@ def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
                 }
             )
         except Exception as e:
+            logger.exception("OCR 子进程处理任务失败 job=%s", job_id)
             response_q.put({"type": "error", "job_id": int(job_id), "error": str(e)})

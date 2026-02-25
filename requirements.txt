@@ -1,5 +1,6 @@
 # 桌面版依赖（本地电脑安装）
 # ⚠️ PaddleOCR 3.x 有 PIR+oneDNN 兼容性问题，必须使用 2.x
+rapidocr-onnxruntime
 paddleocr==2.10.0
 paddlepaddle==2.6.2
 
