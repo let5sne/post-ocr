@@ -41,7 +41,6 @@ def build(debug=False):
         "--hidden-import=cv2",
         "--hidden-import=PIL",
         "--hidden-import=processor",
-        "--hidden-import=ocr_offline",
         "--hidden-import=paddleocr",
         "--hidden-import=paddle",
         # --- paddle DLLs（mklml.dll 等不会被自动收集） ---

@@ -3,18 +3,13 @@ import glob
 import cv2
 import pandas as pd
 from tqdm import tqdm
-from pathlib import Path
 from ocr_engine import create_ocr_engine
 from processor import extract_info, save_to_excel
 
-# 禁用联网检查，加快启动速度
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-
 
 def main():
-    # 初始化 OCR 引擎（默认 rapidocr，可通过环境变量切换）
-    models_dir = Path("models")
-    ocr_engine = create_ocr_engine(models_base_dir=models_dir)
+    # 初始化 OCR 引擎（RapidOCR，自带 ONNX 模型）
+    ocr_engine = create_ocr_engine()
 
     input_dir = "data/input"
     output_dir = "data/output"

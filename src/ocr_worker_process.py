@@ -8,7 +8,6 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
-from pathlib import Path
 from typing import Any
 
 from ocr_engine import create_ocr_engine
@@ -17,13 +16,13 @@ from processor import extract_info
 logger = logging.getLogger("post_ocr.ocr_worker")
 
 
-def run_ocr_worker(models_base_dir: str, request_q, response_q) -> None:
+def run_ocr_worker(request_q, response_q) -> None:
     """
     OCR worker subprocess loop.
     """
     try:
         response_q.put({"type": "progress", "stage": "init_start"})
-        engine = create_ocr_engine(models_base_dir=Path(models_base_dir))
+        engine = create_ocr_engine()
         response_q.put({"type": "ready", "backend": getattr(engine, "backend_name", "unknown")})
     except Exception as e:
         logger.exception("OCR 子进程初始化失败")

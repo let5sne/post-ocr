@@ -25,7 +25,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, pyqtSlot
 from PyQt6.QtGui import QImage, QPixmap, QFont, QAction, QKeySequence, QShortcut, QColor, QBrush
 
-from ocr_offline import get_models_base_dir
 from ocr_worker_process import run_ocr_worker
 
 logger = logging.getLogger("post_ocr.desktop")
@@ -85,9 +84,8 @@ class OCRService(QObject):
     init_error = pyqtSignal(str)
     busy_changed = pyqtSignal(bool)
 
-    def __init__(self, models_base_dir: Path):
+    def __init__(self):
         super().__init__()
-        self._models_base_dir = models_base_dir
         self._busy = False
         self.backend_name = "unknown"
         self._stop_event = threading.Event()
@@ -123,7 +121,7 @@ class OCRService(QObject):
         self._resp_q = self._ctx.Queue()
         self._proc = self._ctx.Process(
             target=run_ocr_worker,
-            args=(str(self._models_base_dir), self._req_q, self._resp_q),
+            args=(self._req_q, self._resp_q),
             name="OCRProcess",
             daemon=True,
         )
@@ -398,14 +396,7 @@ class MainWindow(QMainWindow):
             self._ocr_restarting = False
 
     def _init_ocr_service(self) -> None:
-        models_dir = get_models_base_dir()
-
-        # 先校验模型路径是否存在（缺失直接抛错给 UI）
-        # create_offline_ocr 内部会做更完整校验，这里不提前创建模型，避免阻塞 UI
-        if not models_dir.exists():
-            raise FileNotFoundError(f"离线模型目录不存在：{models_dir}")
-
-        self._ocr_service = OCRService(models_base_dir=models_dir)
+        self._ocr_service = OCRService()
 
         # 注意：OCRService 内部使用独立子进程做 warmup 与推理。
         # 这里强制使用 QueuedConnection，确保 UI 回调始终在主线程执行。

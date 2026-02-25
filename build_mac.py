@@ -31,7 +31,6 @@ def build(debug=False):
         "--hidden-import=cv2",
         "--hidden-import=PIL",
         "--hidden-import=processor",
-        "--hidden-import=ocr_offline",
         "--hidden-import=ocr_engine",
         "--hidden-import=ocr_worker_process",
         # --- 收集 RapidOCR 全部数据（ONNX 模型、字典等） ---

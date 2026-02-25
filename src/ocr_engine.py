@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, List, Optional
 
 logger = logging.getLogger("post_ocr.ocr_engine")
@@ -34,7 +33,7 @@ def _to_float(val: Any) -> Optional[float]:
 class RapidOCREngine(BaseOCREngine):
     backend_name = "rapidocr"
 
-    def __init__(self, models_base_dir: Path):
+    def __init__(self):
         from rapidocr_onnxruntime import RapidOCR
 
         kwargs: dict[str, Any] = {}
@@ -71,7 +70,6 @@ class RapidOCREngine(BaseOCREngine):
         kwargs["text_score"] = text_score
 
         self._ocr = RapidOCR(**kwargs)
-        self._models_base_dir = models_base_dir
 
     def _parse_result_item(self, item: Any) -> Optional[OCRLine]:
         if isinstance(item, dict):
@@ -133,9 +131,9 @@ class RapidOCREngine(BaseOCREngine):
         return lines
 
 
-def create_ocr_engine(models_base_dir: Path) -> BaseOCREngine:
+def create_ocr_engine() -> BaseOCREngine:
     """Create OCR engine (RapidOCR only)."""
     logger.info("create_ocr_engine: initializing RapidOCR, python=%s", sys.executable)
-    engine = RapidOCREngine(models_base_dir=models_base_dir)
+    engine = RapidOCREngine()
     logger.info("create_ocr_engine: using backend=%s", engine.backend_name)
     return engine
