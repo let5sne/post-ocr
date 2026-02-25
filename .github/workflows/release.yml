@@ -22,9 +22,6 @@ jobs:
           - os: windows-latest
             script: build_win.py
             artifact: 信封信息提取系统-windows
-          - os: macos-14
-            script: build_mac.py
-            artifact: 信封信息提取系统-macos-arm64
 
     runs-on: ${{ matrix.os }}
     name: 打包 ${{ matrix.artifact }}
@@ -47,14 +44,9 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python ${{ matrix.script }}
 
-      - name: 压缩产物（Windows）
-        if: runner.os == 'Windows'
+      - name: 压缩产物
         shell: pwsh
         run: Compress-Archive -Path "dist/信封信息提取系统/*" -DestinationPath "${{ matrix.artifact }}.zip"
-
-      - name: 压缩产物（macOS）
-        if: runner.os == 'macOS'
-        run: cd dist && zip -r ../${{ matrix.artifact }}.zip 信封信息提取系统* 
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4

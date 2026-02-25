@@ -93,7 +93,6 @@ POST_OCR_BACKEND=auto .venv/bin/python src/desktop.py
 
 目前支持生成的系统平台：
 - `信封信息提取系统-windows.zip`
-- `信封信息提取系统-macos-arm64.zip`
 
 ---
 
