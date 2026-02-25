@@ -8,6 +8,8 @@
 - 结构化提取：编号、邮编、地址、联系人、电话
 - 支持批量处理，结果导出为 Excel
 - 提供桌面应用，支持摄像头实时拍照识别
+- 内置 RapidOCR/PaddleOCR 双引擎切换，支持脱机运行
+- **支持 GitHub Actions 自动化跨平台出包**
 
 ## 系统要求
 
@@ -65,53 +67,49 @@ POST_OCR_BACKEND=paddle .venv/bin/python src/desktop.py
 POST_OCR_BACKEND=auto .venv/bin/python src/desktop.py
 ```
 
-常用相关环境变量：
-- `POST_OCR_BACKEND_FALLBACK_PADDLE=1|0`：是否允许回退到 Paddle（默认：
-  - `POST_OCR_BACKEND=auto` 时为 `1`
-  - 用户显式 `POST_OCR_BACKEND=rapidocr` 时为 `0`）
-- `POST_OCR_MP_START_METHOD=spawn|fork`：强制指定 OCR 子进程启动方式（macOS 默认：rapidocr 用 `spawn`，paddle 用 `fork`）
-- `POST_OCR_MAIN_SPLIT=1~4`：主 ROI 分片数（默认 2）
-- `POST_OCR_MAX_ROI_WIDTH=600+`：识别前缩放宽度上限（默认 960）
+常用相关环境变量（RapidOCR）：
+- `POST_OCR_RAPID_DET_BOX_THRESH`：检测框置信度阈值（默认 0.3），调低可提升小字检出率。
+- `POST_OCR_RAPID_TEXT_SCORE`：识别结果置信度阈值（默认 0.3），调低可保留可疑单字。
+- `POST_OCR_MAIN_SPLIT`：主 ROI 分片数（默认 1）
+- `POST_OCR_MAX_ROI_WIDTH`：识别前缩放宽度上限（默认 1920）
+
+常用通用环境变量：
+- `POST_OCR_BACKEND_FALLBACK_PADDLE=1|0`：是否允许回退到 Paddle
+- `POST_OCR_MP_START_METHOD=spawn|fork`：强制指定 OCR 子进程启动方式
 - `POST_OCR_JOB_TIMEOUT_SEC`：单次识别超时秒数（默认 25）
+---
+
+## 桌面版打包与分发 (独立运行)
+
+本项目提供基于 **RapidOCR** 的轻量级桌面端（脱离 Python 环境运行），极难受系统环境干扰，且安装包体积更小（~200MB）。
+
+### 推荐方案：GitHub Actions 自动打包
+
+我们配置了自动化的 CI/CD 流程：
+1. 确保代码已推送到 GitHub
+2. 运行 `git tag v1.0.0` 及 `git push origin v1.0.0`（触发构建）
+3. 2~3分钟后，即可前往 [GitHub Releases](https://github.com/let5sne/post-ocr/releases) 下载最新构建好的 `.zip`
+4. 下载后解压即可在对应平台的现场电脑直接运行
+
+目前支持生成的系统平台：
+- `信封信息提取系统-windows.zip`
+- `信封信息提取系统-macos-arm64.zip`
 
 ---
 
-## Windows 桌面离线版（zip 目录包）
+### 备选方案：本地手动打包
 
-本项目桌面版入口为 `src/desktop.py`（PyQt6 + OpenCV），适合现场工位离线使用。
-
-### 1. 准备离线模型（在有网机器执行一次）
+如果你需要在本地测试打包过程：
 
 ```bash
-pip install -r requirements.txt
-python scripts/prepare_models.py --models-dir models
+# 1. 安装打包最小依赖
+pip install -r requirements-build.txt
+
+# 2. 运行打包脚本 (以 macOS 为例，Windows 同理运行 build_win.py)
+python build_mac.py
 ```
 
-执行完成后会生成 `models/whl/...` 目录结构；该 `models/` 目录需要与最终的 exe 同级分发。
-
-### 2. Windows 打包（建议使用 PyInstaller 的 onedir）
-
-请在 Windows 机器上构建 Windows 包（不要跨平台交叉打包）。
-
-```powershell
-pip install -r requirements.txt
-pip install pyinstaller
-
-pyinstaller --noconfirm --clean --windowed --onedir `
-  --name "post-ocr-desktop" `
-  --paths "src" `
-  --collect-all "Cython" `
-  --collect-all "paddleocr" `
-  --collect-all "paddle" `
-  --add-data "models;models" `
-  "src/desktop.py"
-```
-
-打包完成后，将 `dist\post-ocr-desktop\` 整个目录压缩为 zip 交付即可。
-
-注意：
-- 本项目默认使用 PaddleOCR 2.10.0（PP-OCRv4 中文）离线模型目录结构
-- 若 `models/` 缺失，程序会直接报错提示，避免触发联网下载
+打包完成后，`dist/信封信息提取系统/` 目录即为可分发版本。
 
 ## 目录结构
 
@@ -130,9 +128,9 @@ post-ocr/
 
 ## 技术栈
 
-- OCR 引擎: PaddleOCR 2.10 (PP-OCRv4)
-- 桌面框架: PyQt6
-- 数据处理: Pandas
+- 桌面 UI 框架: PyQt6 + OpenCV 
+- OCR 引擎: RapidOCR (默认) / PaddleOCR (兼容备用)
+- 数据处理: Pandas + openpyxl
 
 ## 常见问题
 
